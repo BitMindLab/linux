@@ -1,5 +1,5 @@
 #
-# Makefile for the UNIX Protocol Family.
+# Makefile for the Linux unix domain socket layer.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
@@ -7,29 +7,14 @@
 #
 # Note 2! The CFLAGS definition is now in the main makefile...
 
-.c.o:
-	$(CC) $(CFLAGS) \
-	-c -o $*.o $<
-.s.o:
-	$(AS) -o $*.o $<
-.c.s:
-	$(CC) $(CFLAGS) \
-	-S -o $*.s $<
+O_TARGET := unix.o
 
-OBJS	= sock.o proc.o
+obj-y	 := af_unix.o garbage.o
+obj-m    := $(O_TARGET)
 
-unix.o: $(OBJS)
-	$(LD) -r -o unix.o $(OBJS)
+obj-$(CONFIG_SYSCTL) += sysctl_net_unix.o
 
-dep:
-	$(CPP) -M *.c > .depend
+include $(TOPDIR)/Rules.make
 
 tar:
-	tar -cvf /dev/f1 .
-
-#
-# include a dependency file if one exists
-#
-ifeq (.depend,$(wildcard .depend))
-include .depend
-endif
+		tar -cvf /dev/f1 .

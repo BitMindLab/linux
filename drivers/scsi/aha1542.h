@@ -32,12 +32,13 @@
  */
 
 #include <linux/types.h>
+#include <linux/kdev_t.h>
 
 /* I/O Port interface 4.2 */
 /* READ */
 #define STATUS(base) base
 #define STST	0x80		/* Self Test in Progress */
-#define DIAGF	0x40		/* Internal Diagonostic Failure */
+#define DIAGF	0x40		/* Internal Diagnostic Failure */
 #define INIT	0x20		/* Mailbox Initialization Required */
 #define IDLE	0x10		/* SCSI Host Adapter Idle */
 #define CDF	0x08		/* Command/Data Out Port Full */
@@ -69,6 +70,7 @@
 #define CMD_EMBOI	0x05	/* Enable MailBox Out Interrupt */
 #define CMD_BUSON_TIME	0x07	/* Set Bus-On Time */
 #define CMD_BUSOFF_TIME	0x08	/* Set Bus-Off Time */
+#define CMD_DMASPEED	0x09	/* Set AT Bus Transfer Speed */
 #define CMD_RETDEVS	0x0a	/* Return Installed Devices */
 #define CMD_RETCONF	0x0b	/* Return Configuration Data */
 #define CMD_RETSETUP	0x0d	/* Return Setup Data */
@@ -128,13 +130,16 @@ struct ccb {			/* Command Control Block 5.3 */
 				/* REQUEST SENSE */
 };
 
-int aha1542_detect(int);
+int aha1542_detect(Scsi_Host_Template *);
 int aha1542_command(Scsi_Cmnd *);
 int aha1542_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-int aha1542_abort(Scsi_Cmnd *, int);
-const char *aha1542_info(void);
-int aha1542_reset(Scsi_Cmnd *);
-int aha1542_biosparam(int, int, int*);
+int aha1542_abort(Scsi_Cmnd * SCpnt);
+int aha1542_bus_reset(Scsi_Cmnd * SCpnt);
+int aha1542_dev_reset(Scsi_Cmnd * SCpnt);
+int aha1542_host_reset(Scsi_Cmnd * SCpnt);
+extern int aha1542_old_abort(Scsi_Cmnd * SCpnt);
+int aha1542_old_reset(Scsi_Cmnd *, unsigned int);
+int aha1542_biosparam(Disk *, kdev_t, int*);
 
 #define AHA1542_MAILBOXES 8
 #define AHA1542_SCATTER 16
@@ -144,14 +149,24 @@ int aha1542_biosparam(int, int, int*);
 	#define NULL 0
 #endif
 
-#define AHA1542 {"Adaptec 1542", aha1542_detect,	\
-		aha1542_info, aha1542_command,		\
-		aha1542_queuecommand,			\
-		aha1542_abort,				\
-		aha1542_reset,				\
-	        NULL,		                        \
-		aha1542_biosparam,                      \
-		AHA1542_MAILBOXES, 7, AHA1542_SCATTER, AHA1542_CMDLUN \
-		  , 0, 1}
+#define AHA1542 {    proc_name:			"aha1542",		\
+		     name:			"Adaptec 1542", 	\
+		     detect:			aha1542_detect,		\
+		     command:			aha1542_command,	\
+		     queuecommand:		aha1542_queuecommand,	\
+                     abort:		        aha1542_old_abort,	\
+                     reset:			aha1542_old_reset,	\
+		     eh_abort_handler:		aha1542_abort,		\
+		     eh_device_reset_handler:	aha1542_dev_reset,	\
+		     eh_bus_reset_handler:	aha1542_bus_reset,	\
+		     eh_host_reset_handler:	aha1542_host_reset,	\
+		     bios_param:		aha1542_biosparam,      \
+		     can_queue:			AHA1542_MAILBOXES, 	\
+		     this_id:			7, 			\
+		     sg_tablesize:		AHA1542_SCATTER, 	\
+		     cmd_per_lun:		AHA1542_CMDLUN, 	\
+		     unchecked_isa_dma:		1, 			\
+		     use_clustering:		ENABLE_CLUSTERING,	\
+		     use_new_eh_code:		1}
 
 #endif

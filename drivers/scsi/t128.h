@@ -51,7 +51,7 @@
  * equivalent (my sample board had part second sourced from ZILOG).
  * NCR's recommended "Pseudo-DMA" architecture is used, where 
  * a PAL drives the DMA signals on the 5380 allowing fast, blind
- * transfers with propper handshaking. 
+ * transfers with proper handshaking. 
  */
 
 /*
@@ -78,25 +78,26 @@
 
 #define T_STATUS_REG_OFFSET	0x1c20	/* ro */
 #define T_ST_BOOT		0x80	/* Boot switch */
-#define T_ST_S3			0x40	/* User setable switches, */
+#define T_ST_S3			0x40	/* User settable switches, */
 #define T_ST_S2			0x20	/* read 0 when switch is on, 1 off */
 #define T_ST_S1			0x10
 #define T_ST_PS2		0x08	/* Set for Microchannel 228 */
 #define T_ST_RDY		0x04	/* 5380 DRQ */
 #define T_ST_TIM		0x02	/* indicates 40us watchdog timer fired */
-#define T_ST_ZERO		0x01	/* Allways zero */
+#define T_ST_ZERO		0x01	/* Always zero */
 
 #define T_5380_OFFSET		0x1d00	/* 8 registers here, see NCR5380.h */
 
 #define T_DATA_REG_OFFSET	0x1e00	/* rw 512 bytes long */
 
 #ifndef ASM
-int t128_abort(Scsi_Cmnd *, int);
-int t128_biosparam(int, int, int*);
-int t128_detect(int);
-const char *t128_info(void);
+int t128_abort(Scsi_Cmnd *);
+int t128_biosparam(Disk *, kdev_t, int*);
+int t128_detect(Scsi_Host_Template *);
 int t128_queue_command(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-int t128_reset(Scsi_Cmnd *);
+int t128_reset(Scsi_Cmnd *, unsigned int reset_flags);
+int t128_proc_info (char *buffer, char **start, off_t offset,
+		   int length, int hostno, int inout);
 
 #ifndef NULL
 #define NULL 0
@@ -116,46 +117,53 @@ int t128_reset(Scsi_Cmnd *);
  * macros when this is being used solely for the host stub.
  */
 
-#ifdef HOSTS_C
+#define TRANTOR_T128 {					\
+	name:           "Trantor T128/T128F/T228",	\
+	detect:         t128_detect,			\
+	queuecommand:   t128_queue_command,		\
+	abort:          t128_abort,			\
+	reset:          t128_reset,			\
+	bios_param:     t128_biosparam,			\
+	can_queue:      CAN_QUEUE,			\
+        this_id:        7,				\
+	sg_tablesize:   SG_ALL,				\
+	cmd_per_lun:    CMD_PER_LUN,			\
+	use_clustering: DISABLE_CLUSTERING}
 
-#define TRANTOR_T128 {"Trantor T128/T128F/T228", t128_detect, t128_info,\
-	NULL, t128_queue_command, t128_abort, t128_reset, NULL, 	\
-	t128_biosparam, 						\
-	/* can queue */ CAN_QUEUE, /* id */ 7, SG_ALL,			\
-	/* cmd per lun */ CMD_PER_LUN , 0, 0}
-
-#else
+#ifndef HOSTS_C
 
 #define NCR5380_implementation_fields \
-    volatile unsigned char *base
+    unsigned long base
 
 #define NCR5380_local_declare() \
-    volatile unsigned char *base
+    unsigned long base
 
 #define NCR5380_setup(instance) \
-    base = (volatile unsigned char *) (instance)->base
+    base = (instance)->base
 
 #define T128_address(reg) (base + T_5380_OFFSET + ((reg) * 0x20))
 
 #if !(TDEBUG & TDEBUG_TRANSFER) 
-#define NCR5380_read(reg) (*(T128_address(reg)))
-#define NCR5380_write(reg, value) (*(T128_address(reg)) = (value))
+#define NCR5380_read(reg) isa_readb(T128_address(reg))
+#define NCR5380_write(reg, value) isa_writeb((value),(T128_address(reg)))
 #else
 #define NCR5380_read(reg)						\
     (((unsigned char) printk("scsi%d : read register %d at address %08x\n"\
-    , instance->hostno, (reg), T128_address(reg))), *(T128_address(reg)))
+    , instance->hostno, (reg), T128_address(reg))), isa_readb(T128_address(reg)))
 
 #define NCR5380_write(reg, value) {					\
     printk("scsi%d : write %02x to register %d at address %08x\n", 	\
 	    instance->hostno, (value), (reg), T128_address(reg));	\
-    *(T128_address(reg)) = (value);					\
+    isa_writeb((value), (T128_address(reg)));				\
 }
 #endif
 
 #define NCR5380_intr t128_intr
+#define do_NCR5380_intr do_t128_intr
 #define NCR5380_queue_command t128_queue_command
 #define NCR5380_abort t128_abort
 #define NCR5380_reset t128_reset
+#define NCR5380_proc_info t128_proc_info
 
 /* 15 14 12 10 7 5 3 
    1101 0100 1010 1000 */

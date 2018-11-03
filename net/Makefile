@@ -1,51 +1,55 @@
 #
 # Makefile for the linux networking.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
+# 2 Sep 2000, Christoph Hellwig <hch@caldera.de>
+# Rewritten to use lists instead of if-statements.
 #
-# Note 2! The CFLAGS definition is now in the main makefile...
 
-# only these two lines should need to be changed to remove inet sockets.
-# (and the inet/tcpip.o in net.o)
+O_TARGET :=	network.o
 
-SUBDIRS     := unix inet
+mod-subdirs :=	ipv4/netfilter ipv6/netfilter ipx irda atm netlink sched
+export-objs :=	netsyms.o
 
-SUBOBJS     := $(foreach f,$(SUBDIRS),$f/$f.o)
+subdir-y :=	core ethernet
+subdir-m :=	ipv4 # hum?
 
-.c.o:
-	$(CC) $(CFLAGS) -c $<
-.s.o:
-	$(AS) -o $*.o $<
-.c.s:
-	$(CC) $(CFLAGS) -S $<
 
-OBJS	=  Space.o ddi.o socket.o
+subdir-$(CONFIG_NET)		+= 802 sched
+subdir-$(CONFIG_INET)		+= ipv4
+subdir-$(CONFIG_NETFILTER)	+= ipv4/netfilter
+subdir-$(CONFIG_UNIX)		+= unix
+subdir-$(CONFIG_IPV6)		+= ipv6
 
-all:		subdirs net.o
-
-net.o:		$(OBJS) network.a
-		$(LD) -r -o net.o $(OBJS) network.a
-
-network.a:	$(SUBOBJS)
-		rm -f $@
-		ar rc $@ $(SUBOBJS)
-		ranlib $@
-
-subdirs:	dummy
-		set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i; done
-
-dep:
-		$(CPP) -M *.c > .depend
-		set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i dep; done
-
-dummy:
-
-#
-# include a dependency file if one exists
-#
-ifeq (.depend,$(wildcard .depend))
-include .depend
+ifneq ($(CONFIG_IPV6),n)
+ifneq ($(CONFIG_IPV6),)
+subdir-$(CONFIG_NETFILTER)	+= ipv6/netfilter
+endif
 endif
 
+subdir-$(CONFIG_KHTTPD)		+= khttpd
+subdir-$(CONFIG_NETLINK)	+= netlink
+subdir-$(CONFIG_PACKET)		+= packet
+subdir-$(CONFIG_NET_SCHED)	+= sched
+subdir-$(CONFIG_BRIDGE)		+= bridge
+subdir-$(CONFIG_IPX)		+= ipx
+subdir-$(CONFIG_ATALK)		+= appletalk
+subdir-$(CONFIG_WAN_ROUTER)	+= wanrouter
+subdir-$(CONFIG_X25)		+= x25
+subdir-$(CONFIG_LAPB)		+= lapb
+subdir-$(CONFIG_NETROM)		+= netrom
+subdir-$(CONFIG_ROSE)		+= rose
+subdir-$(CONFIG_AX25)		+= ax25
+subdir-$(CONFIG_IRDA)		+= irda
+subdir-$(CONFIG_SUNRPC)		+= sunrpc
+subdir-$(CONFIG_ATM)		+= atm
+subdir-$(CONFIG_DECNET)		+= decnet
+subdir-$(CONFIG_ECONET)		+= econet
+
+
+obj-y	:= socket.o $(join $(subdir-y), $(patsubst %,/%.o,$(notdir $(subdir-y))))
+ifeq ($(CONFIG_NET),y)
+obj-$(CONFIG_MODULES)		+= netsyms.o
+obj-$(CONFIG_SYSCTL)		+= sysctl_net.o
+endif
+
+include $(TOPDIR)/Rules.make

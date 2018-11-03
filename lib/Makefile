@@ -6,27 +6,14 @@
 # unless it's something special (ie not a .c file).
 #
 
-.c.s:
-	$(CC) $(CFLAGS) -S $<
-.s.o:
-	$(AS) -c -o $*.o $<
-.c.o:
-	$(CC) $(CFLAGS) -c $<
+L_TARGET := lib.a
 
-OBJS  = ctype.o _exit.o open.o close.o errno.o write.o dup.o setsid.o \
-	execve.o wait.o string.o
+export-objs := cmdline.o
 
-lib.a: $(OBJS)
-	$(AR) rcs lib.a $(OBJS)
-	sync
+obj-y := errno.o ctype.o string.o vsprintf.o brlock.o cmdline.o
 
-dep:
-	$(CPP) -M *.c > .depend
-
-#
-# include a dependency file if one exists
-#
-ifeq (.depend,$(wildcard .depend))
-include .depend
+ifneq ($(CONFIG_HAVE_DEC_LOCK),y) 
+  obj-y += dec_and_lock.o
 endif
 
+include $(TOPDIR)/Rules.make

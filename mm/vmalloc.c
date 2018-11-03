@@ -2,127 +2,202 @@
  *  linux/mm/vmalloc.c
  *
  *  Copyright (C) 1993  Linus Torvalds
+ *  Support of BIGMEM added by Gerhard Wichert, Siemens AG, July 1999
+ *  SMP-safe vmalloc/vfree/ioremap, Tigran Aivazian <tigran@veritas.com>, May 2000
  */
 
-#include <asm/system.h>
-#include <linux/config.h>
-
-#include <linux/signal.h>
-#include <linux/sched.h>
-#include <linux/head.h>
-#include <linux/kernel.h>
-#include <linux/errno.h>
-#include <linux/types.h>
 #include <linux/malloc.h>
-#include <asm/segment.h>
+#include <linux/vmalloc.h>
+#include <linux/spinlock.h>
+#include <linux/smp_lock.h>
 
-struct vm_struct {
-	unsigned long flags;
-	void * addr;
-	unsigned long size;
-	struct vm_struct * next;
-};
+#include <asm/uaccess.h>
+#include <asm/pgalloc.h>
 
-static struct vm_struct * vmlist = NULL;
+rwlock_t vmlist_lock = RW_LOCK_UNLOCKED;
+struct vm_struct * vmlist;
 
-/* Just any arbitrary offset to the start of the vmalloc VM area: the
- * current 8MB value just means that there will be a 8MB "hole" after the
- * physical memory until the kernel virtual memory starts.  That means that
- * any out-of-bounds memory accesses will hopefully be caught.
- * The vmalloc() routines leaves a hole of 4kB between each vmalloced
- * area for the same reason. ;)
- */
-#define VMALLOC_OFFSET	(8*1024*1024)
-
-static inline void set_pgdir(unsigned long dindex, unsigned long value)
+static inline void free_area_pte(pmd_t * pmd, unsigned long address, unsigned long size)
 {
-	struct task_struct * p;
+	pte_t * pte;
+	unsigned long end;
 
-	p = &init_task;
+	if (pmd_none(*pmd))
+		return;
+	if (pmd_bad(*pmd)) {
+		pmd_ERROR(*pmd);
+		pmd_clear(pmd);
+		return;
+	}
+	pte = pte_offset(pmd, address);
+	address &= ~PMD_MASK;
+	end = address + size;
+	if (end > PMD_SIZE)
+		end = PMD_SIZE;
 	do {
-		((unsigned long *) p->tss.cr3)[dindex] = value;
-		p = p->next_task;
-	} while (p != &init_task);
-}
-
-static int free_area_pages(unsigned long dindex, unsigned long index, unsigned long nr)
-{
-	unsigned long page, *pte;
-
-	if (!(PAGE_PRESENT & (page = swapper_pg_dir[dindex])))
-		return 0;
-	page &= PAGE_MASK;
-	pte = index + (unsigned long *) page;
-	do {
-		unsigned long pg = *pte;
-		*pte = 0;
-		if (pg & PAGE_PRESENT)
-			free_page(pg);
+		pte_t page;
+		page = ptep_get_and_clear(pte);
+		address += PAGE_SIZE;
 		pte++;
-	} while (--nr);
-	pte = (unsigned long *) page;
-	for (nr = 0 ; nr < 1024 ; nr++, pte++)
-		if (*pte)
-			return 0;
-	set_pgdir(dindex,0);
-	mem_map[MAP_NR(page)] = 1;
-	free_page(page);
-	invalidate();
-	return 0;
+		if (pte_none(page))
+			continue;
+		if (pte_present(page)) {
+			struct page *ptpage = pte_page(page);
+			if (VALID_PAGE(ptpage) && (!PageReserved(ptpage)))
+				__free_page(ptpage);
+			continue;
+		}
+		printk(KERN_CRIT "Whee.. Swapped out page in kernel page table\n");
+	} while (address < end);
 }
 
-static int alloc_area_pages(unsigned long dindex, unsigned long index, unsigned long nr)
+static inline void free_area_pmd(pgd_t * dir, unsigned long address, unsigned long size)
 {
-	unsigned long page, *pte;
+	pmd_t * pmd;
+	unsigned long end;
 
-	page = swapper_pg_dir[dindex];
-	if (!page) {
-		page = get_free_page(GFP_KERNEL);
+	if (pgd_none(*dir))
+		return;
+	if (pgd_bad(*dir)) {
+		pgd_ERROR(*dir);
+		pgd_clear(dir);
+		return;
+	}
+	pmd = pmd_offset(dir, address);
+	address &= ~PGDIR_MASK;
+	end = address + size;
+	if (end > PGDIR_SIZE)
+		end = PGDIR_SIZE;
+	do {
+		free_area_pte(pmd, address, end - address);
+		address = (address + PMD_SIZE) & PMD_MASK;
+		pmd++;
+	} while (address < end);
+}
+
+void vmfree_area_pages(unsigned long address, unsigned long size)
+{
+	pgd_t * dir;
+	unsigned long end = address + size;
+
+	dir = pgd_offset_k(address);
+	flush_cache_all();
+	do {
+		free_area_pmd(dir, address, end - address);
+		address = (address + PGDIR_SIZE) & PGDIR_MASK;
+		dir++;
+	} while (address && (address < end));
+	flush_tlb_all();
+}
+
+static inline int alloc_area_pte (pte_t * pte, unsigned long address,
+			unsigned long size, int gfp_mask, pgprot_t prot)
+{
+	unsigned long end;
+
+	address &= ~PMD_MASK;
+	end = address + size;
+	if (end > PMD_SIZE)
+		end = PMD_SIZE;
+	do {
+		struct page * page;
+		if (!pte_none(*pte))
+			printk(KERN_ERR "alloc_area_pte: page already exists\n");
+		page = alloc_page(gfp_mask);
 		if (!page)
 			return -ENOMEM;
-		if (swapper_pg_dir[dindex]) {
-			free_page(page);
-			page = swapper_pg_dir[dindex];
-		} else {
-			mem_map[MAP_NR(page)] = MAP_PAGE_RESERVED;
-			set_pgdir(dindex, page | PAGE_SHARED);
-		}
-	}
-	page &= PAGE_MASK;
-	pte = index + (unsigned long *) page;
-	*pte = PAGE_SHARED;		/* remove a race with vfree() */
-	do {
-		unsigned long pg = get_free_page(GFP_KERNEL);
-
-		if (!pg)
-			return -ENOMEM;
-		*pte = pg | PAGE_SHARED;
+		set_pte(pte, mk_pte(page, prot));
+		address += PAGE_SIZE;
 		pte++;
-	} while (--nr);
-	invalidate();
+	} while (address < end);
 	return 0;
 }
 
-static int do_area(void * addr, unsigned long size,
-	int (*area_fn)(unsigned long,unsigned long,unsigned long))
+static inline int alloc_area_pmd(pmd_t * pmd, unsigned long address, unsigned long size, int gfp_mask, pgprot_t prot)
 {
-	unsigned long nr, dindex, index;
+	unsigned long end;
 
-	nr = size >> PAGE_SHIFT;
-	dindex = (TASK_SIZE + (unsigned long) addr) >> 22;
-	index = (((unsigned long) addr) >> PAGE_SHIFT) & (PTRS_PER_PAGE-1);
-	while (nr > 0) {
-		unsigned long i = PTRS_PER_PAGE - index;
-
-		if (i > nr)
-			i = nr;
-		nr -= i;
-		if (area_fn(dindex, index, i))
-			return -1;
-		index = 0;
-		dindex++;
-	}
+	address &= ~PGDIR_MASK;
+	end = address + size;
+	if (end > PGDIR_SIZE)
+		end = PGDIR_SIZE;
+	do {
+		pte_t * pte = pte_alloc_kernel(pmd, address);
+		if (!pte)
+			return -ENOMEM;
+		if (alloc_area_pte(pte, address, end - address, gfp_mask, prot))
+			return -ENOMEM;
+		address = (address + PMD_SIZE) & PMD_MASK;
+		pmd++;
+	} while (address < end);
 	return 0;
+}
+
+inline int vmalloc_area_pages (unsigned long address, unsigned long size,
+                               int gfp_mask, pgprot_t prot)
+{
+	pgd_t * dir;
+	unsigned long end = address + size;
+	int ret;
+
+	dir = pgd_offset_k(address);
+	flush_cache_all();
+	lock_kernel();
+	do {
+		pmd_t *pmd;
+		
+		pmd = pmd_alloc_kernel(dir, address);
+		ret = -ENOMEM;
+		if (!pmd)
+			break;
+
+		ret = -ENOMEM;
+		if (alloc_area_pmd(pmd, address, end - address, gfp_mask, prot))
+			break;
+
+		address = (address + PGDIR_SIZE) & PGDIR_MASK;
+		dir++;
+
+		ret = 0;
+	} while (address && (address < end));
+	unlock_kernel();
+	flush_tlb_all();
+	return ret;
+}
+
+struct vm_struct * get_vm_area(unsigned long size, unsigned long flags)
+{
+	unsigned long addr;
+	struct vm_struct **p, *tmp, *area;
+
+	area = (struct vm_struct *) kmalloc(sizeof(*area), GFP_KERNEL);
+	if (!area)
+		return NULL;
+	size += PAGE_SIZE;
+	addr = VMALLOC_START;
+	write_lock(&vmlist_lock);
+	for (p = &vmlist; (tmp = *p) ; p = &tmp->next) {
+		if ((size + addr) < addr) {
+			write_unlock(&vmlist_lock);
+			kfree(area);
+			return NULL;
+		}
+		if (size + addr < (unsigned long) tmp->addr)
+			break;
+		addr = tmp->size + (unsigned long) tmp->addr;
+		if (addr > VMALLOC_END-size) {
+			write_unlock(&vmlist_lock);
+			kfree(area);
+			return NULL;
+		}
+	}
+	area->flags = flags;
+	area->addr = (void *)addr;
+	area->size = size;
+	area->next = *p;
+	*p = area;
+	write_unlock(&vmlist_lock);
+	return area;
 }
 
 void vfree(void * addr)
@@ -132,71 +207,78 @@ void vfree(void * addr)
 	if (!addr)
 		return;
 	if ((PAGE_SIZE-1) & (unsigned long) addr) {
-		printk("Trying to vfree() bad address (%p)\n", addr);
+		printk(KERN_ERR "Trying to vfree() bad address (%p)\n", addr);
 		return;
 	}
+	write_lock(&vmlist_lock);
 	for (p = &vmlist ; (tmp = *p) ; p = &tmp->next) {
 		if (tmp->addr == addr) {
 			*p = tmp->next;
-			do_area(tmp->addr, tmp->size, free_area_pages);
+			vmfree_area_pages(VMALLOC_VMADDR(tmp->addr), tmp->size);
+			write_unlock(&vmlist_lock);
 			kfree(tmp);
 			return;
 		}
 	}
-	printk("Trying to vfree() nonexistent vm area (%p)\n", addr);
+	write_unlock(&vmlist_lock);
+	printk(KERN_ERR "Trying to vfree() nonexistent vm area (%p)\n", addr);
 }
 
-void * vmalloc(unsigned long size)
+void * __vmalloc (unsigned long size, int gfp_mask, pgprot_t prot)
 {
 	void * addr;
-	struct vm_struct **p, *tmp, *area;
+	struct vm_struct *area;
 
 	size = PAGE_ALIGN(size);
-	if (!size || size > high_memory)
+	if (!size || (size >> PAGE_SHIFT) > num_physpages) {
+		BUG();
 		return NULL;
-	area = (struct vm_struct *) kmalloc(sizeof(*area), GFP_KERNEL);
+	}
+	area = get_vm_area(size, VM_ALLOC);
 	if (!area)
 		return NULL;
-	addr = (void *) ((high_memory + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1));
-	area->size = size + PAGE_SIZE;
-	area->next = NULL;
-	for (p = &vmlist; (tmp = *p) ; p = &tmp->next) {
-		if (size + (unsigned long) addr < (unsigned long) tmp->addr)
-			break;
-		addr = (void *) (tmp->size + (unsigned long) tmp->addr);
-	}
-	area->addr = addr;
-	area->next = *p;
-	*p = area;
-	if (do_area(addr, size, alloc_area_pages)) {
+	addr = area->addr;
+	if (vmalloc_area_pages(VMALLOC_VMADDR(addr), size, gfp_mask, prot)) {
 		vfree(addr);
 		return NULL;
 	}
 	return addr;
 }
 
-int vread(char *buf, char *addr, int count)
+long vread(char *buf, char *addr, unsigned long count)
 {
-	struct vm_struct **p, *tmp;
+	struct vm_struct *tmp;
 	char *vaddr, *buf_start = buf;
-	int n;
+	unsigned long n;
 
-	for (p = &vmlist; (tmp = *p) ; p = &tmp->next) {
+	/* Don't allow overflow */
+	if ((unsigned long) addr + count < count)
+		count = -(unsigned long) addr;
+
+	read_lock(&vmlist_lock);
+	for (tmp = vmlist; tmp; tmp = tmp->next) {
 		vaddr = (char *) tmp->addr;
+		if (addr >= vaddr + tmp->size - PAGE_SIZE)
+			continue;
 		while (addr < vaddr) {
 			if (count == 0)
 				goto finished;
-			put_fs_byte('\0', buf++), addr++, count--;
+			*buf = '\0';
+			buf++;
+			addr++;
+			count--;
 		}
-		n = tmp->size - PAGE_SIZE;
-		if (addr > vaddr)
-			n -= addr - vaddr;
-		while (--n >= 0) {
+		n = vaddr + tmp->size - PAGE_SIZE - addr;
+		do {
 			if (count == 0)
 				goto finished;
-			put_fs_byte(*addr++, buf++), count--;
-		}
+			*buf = *addr;
+			buf++;
+			addr++;
+			count--;
+		} while (--n > 0);
 	}
 finished:
+	read_unlock(&vmlist_lock);
 	return buf - buf_start;
 }

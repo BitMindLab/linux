@@ -1,205 +1,221 @@
 /*
  * sound/dev_table.c
- * 
+ *
  * Device call tables.
- * 
- * Copyright by Hannu Savolainen 1993
- * 
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met: 1. Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer. 2.
- * Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- * 
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- * 
+ *
+ *
+ * Copyright (C) by Hannu Savolainen 1993-1997
+ *
+ * OSS/Free for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
+ * Version 2 (June 1991). See the "COPYING" file distributed with this software
+ * for more info.
  */
+
+#include <linux/init.h>
 
 #define _DEV_TABLE_C_
 #include "sound_config.h"
 
-#ifdef CONFIGURE_SOUNDCARD
-
-long
-sndtable_init (long mem_start)
+int sound_install_audiodrv(int vers, char *name, struct audio_driver *driver,
+			int driver_size, int flags, unsigned int format_mask,
+			void *devc, int dma1, int dma2)
 {
-  int             i, n = sizeof (supported_drivers) / sizeof (struct card_info);
+	struct audio_driver *d;
+	struct audio_operations *op;
+	int l, num;
 
-  for (i = 0; i < (n - 1); i++)
-    if (supported_drivers[i].enabled)
-    if (supported_drivers[i].probe (&supported_drivers[i].config))
-      {
-#ifndef SHORT_BANNERS
-	printk ("snd%d",
-		supported_drivers[i].card_type);
-#endif
+	if (vers != AUDIO_DRIVER_VERSION || driver_size > sizeof(struct audio_driver)) {
+		printk(KERN_ERR "Sound: Incompatible audio driver for %s\n", name);
+		return -(EINVAL);
+	}
+	num = sound_alloc_audiodev();
 
-	mem_start = supported_drivers[i].attach (mem_start, &supported_drivers[i].config);
-#ifndef SHORT_BANNERS
-	printk (" at 0x%x irq %d drq %d\n",
-		supported_drivers[i].config.io_base,
-		supported_drivers[i].config.irq,
-		supported_drivers[i].config.dma);
-#endif
-      }
-    else
-      supported_drivers[i].enabled=0;	/* Mark as not detected */
-  return mem_start;
+	if (num == -1) {
+		printk(KERN_ERR "sound: Too many audio drivers\n");
+		return -(EBUSY);
+	}
+	d = (struct audio_driver *) (sound_mem_blocks[sound_nblocks] = vmalloc(sizeof(struct audio_driver)));
+
+	if (sound_nblocks < 1024)
+		sound_nblocks++;
+
+	op = (struct audio_operations *) (sound_mem_blocks[sound_nblocks] = vmalloc(sizeof(struct audio_operations)));
+
+	if (sound_nblocks < 1024)
+		sound_nblocks++;
+	if (d == NULL || op == NULL) {
+		printk(KERN_ERR "Sound: Can't allocate driver for (%s)\n", name);
+		sound_unload_audiodev(num);
+		return -(ENOMEM);
+	}
+	memset((char *) op, 0, sizeof(struct audio_operations));
+	init_waitqueue_head(&op->in_sleeper);
+	init_waitqueue_head(&op->out_sleeper);	
+	init_waitqueue_head(&op->poll_sleeper);
+	if (driver_size < sizeof(struct audio_driver))
+		memset((char *) d, 0, sizeof(struct audio_driver));
+
+	memcpy((char *) d, (char *) driver, driver_size);
+
+	op->d = d;
+	l = strlen(name) + 1;
+	if (l > sizeof(op->name))
+		l = sizeof(op->name);
+	strncpy(op->name, name, l);
+	op->name[l - 1] = 0;
+	op->flags = flags;
+	op->format_mask = format_mask;
+	op->devc = devc;
+
+	/*
+	 *    Hardcoded defaults
+	 */
+	audio_devs[num] = op;
+
+	DMAbuf_init(num, dma1, dma2);
+
+	audio_init_devices();
+	return num;
 }
 
-int
-sndtable_probe (int unit, struct address_info *hw_config)
+int sound_install_mixer(int vers, char *name, struct mixer_operations *driver,
+	int driver_size, void *devc)
 {
-  int             i, n = sizeof (supported_drivers) / sizeof (struct card_info);
+	struct mixer_operations *op;
+	int l;
 
-  if (!unit)
-    return TRUE;
+	int n = sound_alloc_mixerdev();
 
-  for (i = 0; i < (n - 1); i++)
-    if (supported_drivers[i].card_type == unit)
-    {
-	supported_drivers[i].config.io_base = hw_config->io_base;
-	supported_drivers[i].config.irq = hw_config->irq;
-	supported_drivers[i].config.dma = hw_config->dma;
-        if (supported_drivers[i].probe (hw_config)) return 1;
-        supported_drivers[i].enabled=0;	/* Mark as not detected */
-        return 0;
-    }
+	if (n == -1) {
+		printk(KERN_ERR "Sound: Too many mixer drivers\n");
+		return -EBUSY;
+	}
+	if (vers != MIXER_DRIVER_VERSION ||
+		driver_size > sizeof(struct mixer_operations)) {
+		printk(KERN_ERR "Sound: Incompatible mixer driver for %s\n", name);
+		return -EINVAL;
+	}
+	
+	/* FIXME: This leaks a mixer_operations struct every time its called
+	   until you unload sound! */
+	   
+	op = (struct mixer_operations *) (sound_mem_blocks[sound_nblocks] = vmalloc(sizeof(struct mixer_operations)));
 
-  return FALSE;
+	if (sound_nblocks < 1024)
+		sound_nblocks++;
+	if (op == NULL) {
+		printk(KERN_ERR "Sound: Can't allocate mixer driver for (%s)\n", name);
+		return -ENOMEM;
+	}
+	memset((char *) op, 0, sizeof(struct mixer_operations));
+	memcpy((char *) op, (char *) driver, driver_size);
+
+	l = strlen(name) + 1;
+	if (l > sizeof(op->name))
+		l = sizeof(op->name);
+	strncpy(op->name, name, l);
+	op->name[l - 1] = 0;
+	op->devc = devc;
+
+	mixer_devs[n] = op;
+	return n;
 }
 
-int
-sndtable_init_card (int unit, struct address_info *hw_config)
+void sound_unload_audiodev(int dev)
 {
-  int             i, n = sizeof (supported_drivers) / sizeof (struct card_info);
-
-  if (!unit)
-    {
-      if (sndtable_init (0) != 0)
-	panic ("snd: Invalid memory allocation\n");
-      return TRUE;
-    }
-
-  for (i = 0; i < (n - 1); i++)
-    if (supported_drivers[i].card_type == unit)
-      {
-	supported_drivers[i].config.io_base = hw_config->io_base;
-	supported_drivers[i].config.irq = hw_config->irq;
-	supported_drivers[i].config.dma = hw_config->dma;
-
-	if (supported_drivers[i].attach (0, hw_config) != 0)
-	  panic ("snd#: Invalid memory allocation\n");
-	return TRUE;
-      }
-
-  return FALSE;
+	if (dev != -1) {
+		DMAbuf_deinit(dev);
+		audio_devs[dev] = NULL;
+		unregister_sound_dsp((dev<<4)+3);
+	}
 }
 
-int
-sndtable_get_cardcount (void)
-{
-  return num_dspdevs + num_mixers + num_synths + num_midis;
+int sound_alloc_audiodev(void)
+{ 
+	int i = register_sound_dsp(&oss_sound_fops, -1);
+	if(i==-1)
+		return i;
+	i>>=4;
+	if(i>=num_audiodevs)
+		num_audiodevs = i + 1;
+	return i;
 }
 
-#ifdef linux
-void sound_setup(char *str, int *ints)
+int sound_alloc_mididev(void)
 {
-  int             i, n = sizeof (supported_drivers) / sizeof (struct card_info);
+	int i = register_sound_midi(&oss_sound_fops, -1);
+	if(i==-1)
+		return i;
+	i>>=4;
+	if(i>=num_midis)
+		num_midis = i + 1;
+	return i;
+}
 
-/*
- * First disable all drivers
- */
+int sound_alloc_synthdev(void)
+{
+	int i;
 
-	for (i=0;i<n;i++)
-		supported_drivers[i].enabled = 0;
-
-	if (ints[0] == 0 || ints[1] == 0) return;
-/*
- * Then enable them one by time
- */
-
- 	for (i=1;i<=ints[0];i++)
- 	{
- 		int card_type, ioaddr, irq, dma, ptr, j;
- 		unsigned int val;
-
-		val = (unsigned int)ints[i];
-
-		card_type = (val & 0x0ff00000) >> 20;
-
-		if (card_type > 127)
-		{
-			/* Add any future extensions here*/
-			return;
+	for (i = 0; i < MAX_SYNTH_DEV; i++) {
+		if (synth_devs[i] == NULL) {
+			if (i >= num_synths)
+				num_synths++;
+			return i;
 		}
-
-		ioaddr	  = (val & 0x000fff00) >> 8;
-		irq	  = (val & 0x000000f0) >> 4;
-		dma 	  = (val & 0x0000000f);
-
-		ptr = -1;
-		for (j=0;j<n && ptr == -1;j++)
-		if (supported_drivers[j].card_type == card_type)
-			ptr = j;
-
-	 	if (ptr == -1)
-	 	   printk("Sound: Invalid setup parameter 0x%08x\n", val);
-	 	else
-	 	{
-	 		supported_drivers[ptr].enabled = 1;
-	 		supported_drivers[ptr].config.io_base = ioaddr;
-	 		supported_drivers[ptr].config.irq = irq;
-	 		supported_drivers[ptr].config.dma = dma;
-	 	}
- 	}
+	}
+	return -1;
 }
-#else
-void sound_chconf(int card_type, int ioaddr, int irq, int dma)
+
+int sound_alloc_mixerdev(void)
 {
-  int             i, n = sizeof (supported_drivers) / sizeof (struct card_info);
-
- 		int ptr, j;
-
-		ptr = -1;
-		for (j=0;j<n && ptr == -1;j++)
-		if (supported_drivers[j].card_type == card_type)
-			ptr = j;
-
-	 	if (ptr != -1)
-	 	{
-	 		supported_drivers[ptr].enabled = 1;
-	 		if (ioaddr) supported_drivers[ptr].config.io_base = ioaddr;
-	 		if (irq) supported_drivers[ptr].config.irq = irq;
-	 		if (dma) supported_drivers[ptr].config.dma = dma;
-	 	}
+	int i = register_sound_mixer(&oss_sound_fops, -1);
+	if(i==-1)
+		return -1;
+	i>>=4;
+	if(i>=num_mixers)
+		num_mixers = i + 1;
+	return i;
 }
-#endif
 
-struct address_info *sound_getconf(int card_type)
+int sound_alloc_timerdev(void)
 {
-	int j, ptr;
-        int n = sizeof (supported_drivers) / sizeof (struct card_info);
+	int i;
 
-	ptr = -1;
-	for (j=0;j<n && ptr == -1;j++)
-	if (supported_drivers[j].card_type == card_type)
-		ptr = j;
-
- 	if (ptr == -1) return (struct address_info *)NULL;
-
-	return &supported_drivers[ptr].config;
+	for (i = 0; i < MAX_TIMER_DEV; i++) {
+		if (sound_timer_devs[i] == NULL) {
+			if (i >= num_sound_timers)
+				num_sound_timers++;
+			return i;
+		}
+	}
+	return -1;
 }
-#endif
+
+void sound_unload_mixerdev(int dev)
+{
+	if (dev != -1) {
+		mixer_devs[dev] = NULL;
+		unregister_sound_mixer(dev<<4);
+		num_mixers--;
+	}
+}
+
+void sound_unload_mididev(int dev)
+{
+	if (dev != -1) {
+		midi_devs[dev] = NULL;
+		unregister_sound_midi((dev<<4)+2);
+	}
+}
+
+void sound_unload_synthdev(int dev)
+{
+	if (dev != -1)
+		synth_devs[dev] = NULL;
+}
+
+void sound_unload_timerdev(int dev)
+{
+	if (dev != -1)
+		sound_timer_devs[dev] = NULL;
+}

@@ -4,34 +4,34 @@
 /*
  * Copyright (C) 1993 Linus Torvalds
  *
- * Delay routines, using a pre-computed "loops_per_second" value.
+ * Delay routines, using a pre-computed "loops_per_jiffy" value.
  */
 
-extern unsigned long loops_per_sec;
+extern unsigned long loops_per_jiffy;
 
-extern __inline__ void __delay(int loops)
-{
-	__asm__(".align 2,0x90\n1:\tdecl %0\n\tjns 1b": :"a" (loops):"ax");
-}
+#include <asm/delay.h>
 
 /*
- * division by multiplication: you don't have to worry about
- * loss of precision.
- *
- * Use only for very small delays ( < 1 msec).  Should probably use a
- * lookup table, really, as the multiplications take much too long with
- * short delays.  This is a "reasonable" implementation, though (and the
- * first constant multiplications gets optimized away if the delay is
- * a constant)
+ * Using udelay() for intervals greater than a few milliseconds can
+ * risk overflow for high loops_per_jiffy (high bogomips) machines. The
+ * mdelay() provides a wrapper to prevent this.  For delays greater
+ * than MAX_UDELAY_MS milliseconds, the wrapper is used.  Architecture
+ * specific values can be defined in asm-???/delay.h as an override.
+ * The 2nd mdelay() definition ensures GCC will optimize away the 
+ * while loop for the common cases where n <= MAX_UDELAY_MS  --  Paul G.
  */
-extern __inline__ void udelay(unsigned long usecs)
-{
-	usecs *= 0x000010c6;		/* 2**32 / 1000000 */
-	__asm__("mull %0"
-		:"=d" (usecs)
-		:"a" (usecs),"0" (loops_per_sec)
-		:"ax");
-	__delay(usecs);
-}
 
+#ifndef MAX_UDELAY_MS
+#define MAX_UDELAY_MS	5
 #endif
+
+#ifdef notdef
+#define mdelay(n) (\
+	{unsigned long msec=(n); while (msec--) udelay(1000);})
+#else
+#define mdelay(n) (\
+	(__builtin_constant_p(n) && (n)<=MAX_UDELAY_MS) ? udelay((n)*1000) : \
+	({unsigned long msec=(n); while (msec--) udelay(1000);}))
+#endif
+
+#endif /* defined(_LINUX_DELAY_H) */

@@ -7,25 +7,10 @@
 #
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
-.c.s:
-	$(CC) $(CFLAGS) -S $<
-.c.o:
-	$(CC) $(CFLAGS) -c $<
-.s.o:
-	$(AS) -o $*.o $<
+O_TARGET := ext2.o
 
-OBJS=	acl.o balloc.o bitmap.o dcache.o dir.o file.o fsync.o \
-	ialloc.o inode.o ioctl.o namei.o super.o symlink.o truncate.o
+obj-y    := acl.o balloc.o bitmap.o dir.o file.o fsync.o ialloc.o inode.o \
+		ioctl.o namei.o super.o symlink.o
+obj-m    := $(O_TARGET)
 
-ext2.o: $(OBJS)
-	$(LD) -r -o ext2.o $(OBJS)
-
-dep:
-	$(CPP) -M *.c > .depend
-
-#
-# include a dependency file if one exists
-#
-ifeq (.depend,$(wildcard .depend))
-include .depend
-endif
+include $(TOPDIR)/Rules.make

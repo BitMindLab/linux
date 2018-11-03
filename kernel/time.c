@@ -10,203 +10,123 @@
 /*
  * Modification history kernel/time.c
  * 
- * 02 Sep 93    Philip Gladstone
+ * 1993-09-02    Philip Gladstone
  *      Created file with time related functions from sched.c and adjtimex() 
- * 08 Oct 93    Torsten Duwe
+ * 1993-10-08    Torsten Duwe
  *      adjtime interface update and CMOS clock write code
+ * 1995-08-13    Torsten Duwe
+ *      kernel PLL updated to 1994-12-13 specs (rfc-1589)
+ * 1999-01-16    Ulrich Windl
+ *	Introduced error checking for many cases in adjtimex().
+ *	Updated NTP code according to technical memorandum Jan '96
+ *	"A Kernel Model for Precision Timekeeping" by Dave Mills
+ *	Allow time_constant larger than MAXTC(6) for NTP v4 (MAXTC == 10)
+ *	(Even though the technical memorandum forbids it)
  */
 
-#include <linux/config.h>
-#include <linux/errno.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/param.h>
-#include <linux/string.h>
-
-#include <asm/segment.h>
-#include <asm/io.h>
-
-#include <linux/mc146818rtc.h>
-#define RTC_ALWAYS_BCD 1
-
+#include <linux/mm.h>
 #include <linux/timex.h>
-extern struct timeval xtime;
+#include <linux/smp_lock.h>
 
-#include <linux/mktime.h>
-extern long kernel_mktime(struct mktime * time);
+#include <asm/uaccess.h>
 
-void time_init(void)
-{
-	struct mktime time;
-	int i;
-
-	/* checking for Update-In-Progress could be done more elegantly
-	 * (using the "update finished"-interrupt for example), but that
-	 * would require excessive testing. promise I'll do that when I find
-	 * the time.			- Torsten
-	 */
-	/* read RTC exactly on falling edge of update flag */
-	for (i = 0 ; i < 1000000 ; i++)	/* may take up to 1 second... */
-		if (CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP)
-			break;
-	for (i = 0 ; i < 1000000 ; i++)	/* must try at least 2.228 ms*/
-		if (!(CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP))
-			break;
-	do { /* Isn't this overkill ? UIP above should guarantee consistency */
-		time.sec = CMOS_READ(RTC_SECONDS);
-		time.min = CMOS_READ(RTC_MINUTES);
-		time.hour = CMOS_READ(RTC_HOURS);
-		time.day = CMOS_READ(RTC_DAY_OF_MONTH);
-		time.mon = CMOS_READ(RTC_MONTH);
-		time.year = CMOS_READ(RTC_YEAR);
-	} while (time.sec != CMOS_READ(RTC_SECONDS));
-	if (!(CMOS_READ(RTC_CONTROL) & RTC_DM_BINARY) || RTC_ALWAYS_BCD)
-	  {
-	    BCD_TO_BIN(time.sec);
-	    BCD_TO_BIN(time.min);
-	    BCD_TO_BIN(time.hour);
-	    BCD_TO_BIN(time.day);
-	    BCD_TO_BIN(time.mon);
-	    BCD_TO_BIN(time.year);
-	  }
-	time.mon--;
-	xtime.tv_sec = kernel_mktime(&time);
-      }
 /* 
  * The timezone where the local system is located.  Used as a default by some
  * programs who obtain this value by using gettimeofday.
  */
-struct timezone sys_tz = { 0, 0};
+struct timezone sys_tz;
 
-asmlinkage int sys_time(long * tloc)
+static void do_normal_gettime(struct timeval * tm)
 {
-	int i, error;
+        *tm=xtime;
+}
 
+void (*do_get_fast_time)(struct timeval *) = do_normal_gettime;
+
+/*
+ * Generic way to access 'xtime' (the current time of day).
+ * This can be changed if the platform provides a more accurate (and fast!) 
+ * version.
+ */
+
+void get_fast_time(struct timeval * t)
+{
+	do_get_fast_time(t);
+}
+
+/* The xtime_lock is not only serializing the xtime read/writes but it's also
+   serializing all accesses to the global NTP variables now. */
+extern rwlock_t xtime_lock;
+
+#if !defined(__alpha__) && !defined(__ia64__)
+
+/*
+ * sys_time() can be implemented in user-level using
+ * sys_gettimeofday().  Is this for backwards compatibility?  If so,
+ * why not move it into the appropriate arch directory (for those
+ * architectures that need it).
+ *
+ * XXX This function is NOT 64-bit clean!
+ */
+asmlinkage long sys_time(int * tloc)
+{
+	int i;
+
+	/* SMP: This is fairly trivial. We grab CURRENT_TIME and 
+	   stuff it to user space. No side effects */
 	i = CURRENT_TIME;
 	if (tloc) {
-		error = verify_area(VERIFY_WRITE, tloc, 4);
-		if (error)
-			return error;
-		put_fs_long(i,(unsigned long *)tloc);
+		if (put_user(i,tloc))
+			i = -EFAULT;
 	}
 	return i;
 }
 
-asmlinkage int sys_stime(long * tptr)
+/*
+ * sys_stime() can be implemented in user-level using
+ * sys_settimeofday().  Is this for backwards compatibility?  If so,
+ * why not move it into the appropriate arch directory (for those
+ * architectures that need it).
+ */
+ 
+asmlinkage long sys_stime(int * tptr)
 {
-	if (!suser())
+	int value;
+
+	if (!capable(CAP_SYS_TIME))
 		return -EPERM;
-	cli();
-	xtime.tv_sec = get_fs_long((unsigned long *) tptr);
+	if (get_user(value, tptr))
+		return -EFAULT;
+	write_lock_irq(&xtime_lock);
+	xtime.tv_sec = value;
 	xtime.tv_usec = 0;
-	time_status = TIME_BAD;
-	time_maxerror = 0x70000000;
-	time_esterror = 0x70000000;
-	sti();
+	time_adjust = 0;	/* stop active adjtime() */
+	time_status |= STA_UNSYNC;
+	time_maxerror = NTP_PHASE_LIMIT;
+	time_esterror = NTP_PHASE_LIMIT;
+	write_unlock_irq(&xtime_lock);
 	return 0;
 }
 
-/* This function must be called with interrupts disabled 
- * It was inspired by Steve McCanne's microtime-i386 for BSD.  -- jrs
- * 
- * However, the pc-audio speaker driver changes the divisor so that
- * it gets interrupted rather more often - it loads 64 into the
- * counter rather than 11932! This has an adverse impact on
- * do_gettimeoffset() -- it stops working! What is also not
- * good is that the interval that our timer function gets called
- * is no longer 10.0002 msecs, but 9.9767 msec. To get around this
- * would require using a different timing source. Maybe someone
- * could use the RTC - I know that this can interrupt at frequencies
- * ranging from 8192Hz to 2Hz. If I had the energy, I'd somehow fix
- * it so that at startup, the timer code in sched.c would select
- * using either the RTC or the 8253 timer. The decision would be
- * based on whether there was any other device around that needed
- * to trample on the 8253. I'd set up the RTC to interrupt at 1024Hz,
- * and then do some jiggery to have a version of do_timer that 
- * advanced the clock by 1/1024 sec. Every time that reached over 1/100
- * of a second, then do all the old code. If the time was kept correct
- * then do_gettimeoffset could just return 0 - there is no low order
- * divider that can be accessed.
- *
- * Ideally, you would be able to use the RTC for the speaker driver,
- * but it appears that the speaker driver really needs interrupt more
- * often than every 120us or so.
- *
- * Anyway, this needs more thought....		pjsg (28 Aug 93)
- * 
- * If you are really that interested, you should be reading
- * comp.protocols.time.ntp!
- */
+#endif
 
-#define TICK_SIZE tick
-
-static inline unsigned long do_gettimeoffset(void)
+asmlinkage long sys_gettimeofday(struct timeval *tv, struct timezone *tz)
 {
-	int count;
-	unsigned long offset = 0;
-
-	/* timer count may underflow right here */
-	outb_p(0x00, 0x43);	/* latch the count ASAP */
-	count = inb_p(0x40);	/* read the latched count */
-	count |= inb(0x40) << 8;
-	/* we know probability of underflow is always MUCH less than 1% */
-	if (count > (LATCH - LATCH/100)) {
-		/* check for pending timer interrupt */
-		outb_p(0x0a, 0x20);
-		if (inb(0x20) & 1)
-			offset = TICK_SIZE;
-	}
-	count = ((LATCH-1) - count) * TICK_SIZE;
-	count = (count + LATCH/2) / LATCH;
-	return offset + count;
-}
-
-/*
- * This version of gettimeofday has near microsecond resolution.
- */
-static inline void do_gettimeofday(struct timeval *tv)
-{
-#ifdef __i386__
-	cli();
-	*tv = xtime;
-	tv->tv_usec += do_gettimeoffset();
-	if (tv->tv_usec >= 1000000) {
-		tv->tv_usec -= 1000000;
-		tv->tv_sec++;
-	}
-	sti();
-#else /* not __i386__ */
-	cli();
-	*tv = xtime;
-	sti();
-#endif /* not __i386__ */
-}
-
-asmlinkage int sys_gettimeofday(struct timeval *tv, struct timezone *tz)
-{
-	int error;
-
 	if (tv) {
 		struct timeval ktv;
-		error = verify_area(VERIFY_WRITE, tv, sizeof *tv);
-		if (error)
-			return error;
 		do_gettimeofday(&ktv);
-		put_fs_long(ktv.tv_sec, (unsigned long *) &tv->tv_sec);
-		put_fs_long(ktv.tv_usec, (unsigned long *) &tv->tv_usec);
+		if (copy_to_user(tv, &ktv, sizeof(ktv)))
+			return -EFAULT;
 	}
 	if (tz) {
-		error = verify_area(VERIFY_WRITE, tz, sizeof *tz);
-		if (error)
-			return error;
-		put_fs_long(sys_tz.tz_minuteswest, (unsigned long *) tz);
-		put_fs_long(sys_tz.tz_dsttime, ((unsigned long *) tz)+1);
+		if (copy_to_user(tz, &sys_tz, sizeof(sys_tz)))
+			return -EFAULT;
 	}
 	return 0;
 }
 
 /*
- * Adjust the time obtained from the CMOS to be GMT time instead of
+ * Adjust the time obtained from the CMOS to be UTC time instead of
  * local time.
  * 
  * This is ugly, but preferable to the alternatives.  Otherwise we
@@ -215,228 +135,286 @@ asmlinkage int sys_gettimeofday(struct timeval *tv, struct timezone *tz)
  * hard to make the program warp the clock precisely n hours)  or
  * compile in the timezone information into the kernel.  Bad, bad....
  *
- * XXX Currently does not adjust for daylight savings time.  May not
- * need to do anything, depending on how smart (dumb?) the BIOS
- * is.  Blast it all.... the best thing to do not depend on the CMOS
- * clock at all, but get the time via NTP or timed if you're on a 
- * network....				- TYT, 1/1/92
+ *              				- TYT, 1992-01-01
+ *
+ * The best thing to do is to keep the CMOS clock in universal time (UTC)
+ * as real UNIX machines always do it. This avoids all headaches about
+ * daylight saving times and warping kernel clocks.
  */
 inline static void warp_clock(void)
 {
-	cli();
+	write_lock_irq(&xtime_lock);
 	xtime.tv_sec += sys_tz.tz_minuteswest * 60;
-	sti();
+	write_unlock_irq(&xtime_lock);
 }
 
 /*
- * The first time we set the timezone, we will warp the clock so that
- * it is ticking GMT time instead of local time.  Presumably, 
- * if someone is setting the timezone then we are running in an
- * environment where the programs understand about timezones.
- * This should be done at boot time in the /etc/rc script, as
- * soon as possible, so that the clock can be set right.  Otherwise,
+ * In case for some reason the CMOS clock has not already been running
+ * in UTC, but in some local time: The first time we set the timezone,
+ * we will warp the clock so that it is ticking UTC time instead of
+ * local time. Presumably, if someone is setting the timezone then we
+ * are running in an environment where the programs understand about
+ * timezones. This should be done at boot time in the /etc/rc script,
+ * as soon as possible, so that the clock can be set right. Otherwise,
  * various programs will get confused when the clock gets warped.
  */
-asmlinkage int sys_settimeofday(struct timeval *tv, struct timezone *tz)
-{
-	static int	firsttime = 1;
 
-	if (!suser())
+int do_sys_settimeofday(struct timeval *tv, struct timezone *tz)
+{
+	static int firsttime = 1;
+
+	if (!capable(CAP_SYS_TIME))
 		return -EPERM;
+		
 	if (tz) {
-		sys_tz.tz_minuteswest = get_fs_long((unsigned long *) tz);
-		sys_tz.tz_dsttime = get_fs_long(((unsigned long *) tz)+1);
+		/* SMP safe, global irq locking makes it work. */
+		sys_tz = *tz;
 		if (firsttime) {
 			firsttime = 0;
 			if (!tv)
 				warp_clock();
 		}
 	}
-	if (tv) {
-		int sec, usec;
-
-		sec = get_fs_long((unsigned long *)tv);
-		usec = get_fs_long(((unsigned long *)tv)+1);
-	
-		cli();
-		/* This is revolting. We need to set the xtime.tv_usec
-		 * correctly. However, the value in this location is
-		 * is value at the last tick.
-		 * Discover what correction gettimeofday
-		 * would have done, and then undo it!
+	if (tv)
+	{
+		/* SMP safe, again the code in arch/foo/time.c should
+		 * globally block out interrupts when it runs.
 		 */
-		usec -= do_gettimeoffset();
-
-		if (usec < 0)
-		{
-			usec += 1000000;
-			sec--;
-		}
-		xtime.tv_sec = sec;
-		xtime.tv_usec = usec;
-		time_status = TIME_BAD;
-		time_maxerror = 0x70000000;
-		time_esterror = 0x70000000;
-		sti();
+		do_settimeofday(tv);
 	}
 	return 0;
 }
 
+asmlinkage long sys_settimeofday(struct timeval *tv, struct timezone *tz)
+{
+	struct timeval	new_tv;
+	struct timezone new_tz;
+
+	if (tv) {
+		if (copy_from_user(&new_tv, tv, sizeof(*tv)))
+			return -EFAULT;
+	}
+	if (tz) {
+		if (copy_from_user(&new_tz, tz, sizeof(*tz)))
+			return -EFAULT;
+	}
+
+	return do_sys_settimeofday(tv ? &new_tv : NULL, tz ? &new_tz : NULL);
+}
+
+long pps_offset;		/* pps time offset (us) */
+long pps_jitter = MAXTIME;	/* time dispersion (jitter) (us) */
+
+long pps_freq;			/* frequency offset (scaled ppm) */
+long pps_stabil = MAXFREQ;	/* frequency dispersion (scaled ppm) */
+
+long pps_valid = PPS_VALID;	/* pps signal watchdog counter */
+
+int pps_shift = PPS_SHIFT;	/* interval duration (s) (shift) */
+
+long pps_jitcnt;		/* jitter limit exceeded */
+long pps_calcnt;		/* calibration intervals */
+long pps_errcnt;		/* calibration errors */
+long pps_stbcnt;		/* stability limit exceeded */
+
+/* hook for a loadable hardpps kernel module */
+void (*hardpps_ptr)(struct timeval *);
+
 /* adjtimex mainly allows reading (and writing, if superuser) of
  * kernel time-keeping variables. used by xntpd.
  */
-asmlinkage int sys_adjtimex(struct timex *txc_p)
+int do_adjtimex(struct timex *txc)
 {
         long ltemp, mtemp, save_adjust;
-	int error;
+	int result;
 
-	/* Local copy of parameter */
-	struct timex txc;
+	/* In order to modify anything, you gotta be super-user! */
+	if (txc->modes && !capable(CAP_SYS_TIME))
+		return -EPERM;
+		
+	/* Now we validate the data before disabling interrupts */
 
-	error = verify_area(VERIFY_WRITE, txc_p, sizeof(struct timex));
-	if (error)
-	  return error;
+	if (txc->modes != ADJ_OFFSET_SINGLESHOT && (txc->modes & ADJ_OFFSET))
+	  /* adjustment Offset limited to +- .512 seconds */
+		if (txc->offset <= - MAXPHASE || txc->offset >= MAXPHASE )
+			return -EINVAL;	
+
+	/* if the quartz is off by more than 10% something is VERY wrong ! */
+	if (txc->modes & ADJ_TICK)
+		if (txc->tick < 900000/HZ || txc->tick > 1100000/HZ)
+			return -EINVAL;
+
+	write_lock_irq(&xtime_lock);
+	result = time_state;	/* mostly `TIME_OK' */
+
+	/* Save for later - semantics of adjtime is to return old value */
+	save_adjust = time_adjust;
+
+#if 0	/* STA_CLOCKERR is never set yet */
+	time_status &= ~STA_CLOCKERR;		/* reset STA_CLOCKERR */
+#endif
+	/* If there are input parameters, then process them */
+	if (txc->modes)
+	{
+	    if (txc->modes & ADJ_STATUS)	/* only set allowed bits */
+		time_status =  (txc->status & ~STA_RONLY) |
+			      (time_status & STA_RONLY);
+
+	    if (txc->modes & ADJ_FREQUENCY) {	/* p. 22 */
+		if (txc->freq > MAXFREQ || txc->freq < -MAXFREQ) {
+		    result = -EINVAL;
+		    goto leave;
+		}
+		time_freq = txc->freq - pps_freq;
+	    }
+
+	    if (txc->modes & ADJ_MAXERROR) {
+		if (txc->maxerror < 0 || txc->maxerror >= NTP_PHASE_LIMIT) {
+		    result = -EINVAL;
+		    goto leave;
+		}
+		time_maxerror = txc->maxerror;
+	    }
+
+	    if (txc->modes & ADJ_ESTERROR) {
+		if (txc->esterror < 0 || txc->esterror >= NTP_PHASE_LIMIT) {
+		    result = -EINVAL;
+		    goto leave;
+		}
+		time_esterror = txc->esterror;
+	    }
+
+	    if (txc->modes & ADJ_TIMECONST) {	/* p. 24 */
+		if (txc->constant < 0) {	/* NTP v4 uses values > 6 */
+		    result = -EINVAL;
+		    goto leave;
+		}
+		time_constant = txc->constant;
+	    }
+
+	    if (txc->modes & ADJ_OFFSET) {	/* values checked earlier */
+		if (txc->modes == ADJ_OFFSET_SINGLESHOT) {
+		    /* adjtime() is independent from ntp_adjtime() */
+		    time_adjust = txc->offset;
+		}
+		else if ( time_status & (STA_PLL | STA_PPSTIME) ) {
+		    ltemp = (time_status & (STA_PPSTIME | STA_PPSSIGNAL)) ==
+		            (STA_PPSTIME | STA_PPSSIGNAL) ?
+		            pps_offset : txc->offset;
+
+		    /*
+		     * Scale the phase adjustment and
+		     * clamp to the operating range.
+		     */
+		    if (ltemp > MAXPHASE)
+		        time_offset = MAXPHASE << SHIFT_UPDATE;
+		    else if (ltemp < -MAXPHASE)
+			time_offset = -(MAXPHASE << SHIFT_UPDATE);
+		    else
+		        time_offset = ltemp << SHIFT_UPDATE;
+
+		    /*
+		     * Select whether the frequency is to be controlled
+		     * and in which mode (PLL or FLL). Clamp to the operating
+		     * range. Ugly multiply/divide should be replaced someday.
+		     */
+
+		    if (time_status & STA_FREQHOLD || time_reftime == 0)
+		        time_reftime = xtime.tv_sec;
+		    mtemp = xtime.tv_sec - time_reftime;
+		    time_reftime = xtime.tv_sec;
+		    if (time_status & STA_FLL) {
+		        if (mtemp >= MINSEC) {
+			    ltemp = (time_offset / mtemp) << (SHIFT_USEC -
+							      SHIFT_UPDATE);
+			    if (ltemp < 0)
+			        time_freq -= -ltemp >> SHIFT_KH;
+			    else
+			        time_freq += ltemp >> SHIFT_KH;
+			} else /* calibration interval too short (p. 12) */
+				result = TIME_ERROR;
+		    } else {	/* PLL mode */
+		        if (mtemp < MAXSEC) {
+			    ltemp *= mtemp;
+			    if (ltemp < 0)
+			        time_freq -= -ltemp >> (time_constant +
+							time_constant +
+							SHIFT_KF - SHIFT_USEC);
+			    else
+			        time_freq += ltemp >> (time_constant +
+						       time_constant +
+						       SHIFT_KF - SHIFT_USEC);
+			} else /* calibration interval too long (p. 12) */
+				result = TIME_ERROR;
+		    }
+		    if (time_freq > time_tolerance)
+		        time_freq = time_tolerance;
+		    else if (time_freq < -time_tolerance)
+		        time_freq = -time_tolerance;
+		} /* STA_PLL || STA_PPSTIME */
+	    } /* txc->modes & ADJ_OFFSET */
+	    if (txc->modes & ADJ_TICK) {
+		/* if the quartz is off by more than 10% something is
+		   VERY wrong ! */
+		if (txc->tick < 900000/HZ || txc->tick > 1100000/HZ) {
+		    result = -EINVAL;
+		    goto leave;
+		}
+		tick = txc->tick;
+	    }
+	} /* txc->modes */
+leave:	if ((time_status & (STA_UNSYNC|STA_CLOCKERR)) != 0
+	    || ((time_status & (STA_PPSFREQ|STA_PPSTIME)) != 0
+		&& (time_status & STA_PPSSIGNAL) == 0)
+	    /* p. 24, (b) */
+	    || ((time_status & (STA_PPSTIME|STA_PPSJITTER))
+		== (STA_PPSTIME|STA_PPSJITTER))
+	    /* p. 24, (c) */
+	    || ((time_status & STA_PPSFREQ) != 0
+		&& (time_status & (STA_PPSWANDER|STA_PPSERROR)) != 0))
+	    /* p. 24, (d) */
+		result = TIME_ERROR;
+	
+	if ((txc->modes & ADJ_OFFSET_SINGLESHOT) == ADJ_OFFSET_SINGLESHOT)
+	    txc->offset	   = save_adjust;
+	else {
+	    if (time_offset < 0)
+		txc->offset = -(-time_offset >> SHIFT_UPDATE);
+	    else
+		txc->offset = time_offset >> SHIFT_UPDATE;
+	}
+	txc->freq	   = time_freq + pps_freq;
+	txc->maxerror	   = time_maxerror;
+	txc->esterror	   = time_esterror;
+	txc->status	   = time_status;
+	txc->constant	   = time_constant;
+	txc->precision	   = time_precision;
+	txc->tolerance	   = time_tolerance;
+	txc->tick	   = tick;
+	txc->ppsfreq	   = pps_freq;
+	txc->jitter	   = pps_jitter >> PPS_AVG;
+	txc->shift	   = pps_shift;
+	txc->stabil	   = pps_stabil;
+	txc->jitcnt	   = pps_jitcnt;
+	txc->calcnt	   = pps_calcnt;
+	txc->errcnt	   = pps_errcnt;
+	txc->stbcnt	   = pps_stbcnt;
+	write_unlock_irq(&xtime_lock);
+	do_gettimeofday(&txc->time);
+	return(result);
+}
+
+asmlinkage long sys_adjtimex(struct timex *txc_p)
+{
+	struct timex txc;		/* Local copy of parameter */
+	int ret;
 
 	/* Copy the user data space into the kernel copy
 	 * structure. But bear in mind that the structures
 	 * may change
 	 */
-	memcpy_fromfs(&txc, txc_p, sizeof(struct timex));
-
-	/* In order to modify anything, you gotta be super-user! */
-	if (txc.mode && !suser())
-		return -EPERM;
-
-	/* Now we validate the data before disabling interrupts
-	 */
-
-	if (txc.mode & ADJ_OFFSET)
-	  /* Microsec field limited to -131000 .. 131000 usecs */
-	  if (txc.offset <= -(1 << (31 - SHIFT_UPDATE))
-	      || txc.offset >= (1 << (31 - SHIFT_UPDATE)))
-	    return -EINVAL;
-
-	/* time_status must be in a fairly small range */
-	if (txc.mode & ADJ_STATUS)
-	  if (txc.status < TIME_OK || txc.status > TIME_BAD)
-	    return -EINVAL;
-
-	/* if the quartz is off by more than 10% something is VERY wrong ! */
-	if (txc.mode & ADJ_TICK)
-	  if (txc.tick < 900000/HZ || txc.tick > 1100000/HZ)
-	    return -EINVAL;
-
-	cli();
-
-	/* Save for later - semantics of adjtime is to return old value */
-	save_adjust = time_adjust;
-
-	/* If there are input parameters, then process them */
-	if (txc.mode)
-	{
-	    if (time_status == TIME_BAD)
-		time_status = TIME_OK;
-
-	    if (txc.mode & ADJ_STATUS)
-		time_status = txc.status;
-
-	    if (txc.mode & ADJ_FREQUENCY)
-		time_freq = txc.frequency << (SHIFT_KF - 16);
-
-	    if (txc.mode & ADJ_MAXERROR)
-		time_maxerror = txc.maxerror;
-
-	    if (txc.mode & ADJ_ESTERROR)
-		time_esterror = txc.esterror;
-
-	    if (txc.mode & ADJ_TIMECONST)
-		time_constant = txc.time_constant;
-
-	    if (txc.mode & ADJ_OFFSET)
-	      if (txc.mode == ADJ_OFFSET_SINGLESHOT)
-		{
-		  time_adjust = txc.offset;
-		}
-	      else /* XXX should give an error if other bits set */
-		{
-		  time_offset = txc.offset << SHIFT_UPDATE;
-		  mtemp = xtime.tv_sec - time_reftime;
-		  time_reftime = xtime.tv_sec;
-		  if (mtemp > (MAXSEC+2) || mtemp < 0)
-		    mtemp = 0;
-
-		  if (txc.offset < 0)
-		    time_freq -= (-txc.offset * mtemp) >>
-		      (time_constant + time_constant);
-		  else
-		    time_freq += (txc.offset * mtemp) >>
-		      (time_constant + time_constant);
-
-		  ltemp = time_tolerance << SHIFT_KF;
-
-		  if (time_freq > ltemp)
-		    time_freq = ltemp;
-		  else if (time_freq < -ltemp)
-		    time_freq = -ltemp;
-		}
-	    if (txc.mode & ADJ_TICK)
-	      tick = txc.tick;
-
-	}
-	txc.offset	   = save_adjust;
-	txc.frequency	   = ((time_freq+1) >> (SHIFT_KF - 16));
-	txc.maxerror	   = time_maxerror;
-	txc.esterror	   = time_esterror;
-	txc.status	   = time_status;
-	txc.time_constant  = time_constant;
-	txc.precision	   = time_precision;
-	txc.tolerance	   = time_tolerance;
-	txc.time	   = xtime;
-	txc.tick	   = tick;
-
-	sti();
-
-	memcpy_tofs(txc_p, &txc, sizeof(struct timex));
-	return time_status;
-}
-
-int set_rtc_mmss(unsigned long nowtime)
-{
-  int retval = 0;
-  short real_seconds = nowtime % 60, real_minutes = (nowtime / 60) % 60;
-  unsigned char save_control, save_freq_select, cmos_minutes;
-
-  save_control = CMOS_READ(RTC_CONTROL); /* tell the clock it's being set */
-  CMOS_WRITE((save_control|RTC_SET), RTC_CONTROL);
-
-  save_freq_select = CMOS_READ(RTC_FREQ_SELECT); /* stop and reset prescaler */
-  CMOS_WRITE((save_freq_select|RTC_DIV_RESET2), RTC_FREQ_SELECT);
-
-  cmos_minutes = CMOS_READ(RTC_MINUTES);
-  if (!(save_control & RTC_DM_BINARY) || RTC_ALWAYS_BCD)
-    BCD_TO_BIN(cmos_minutes);
-
-  /* since we're only adjusting minutes and seconds,
-   * don't interfere with hour overflow. This avoids
-   * messing with unknown time zones but requires your
-   * RTC not to be off by more than 30 minutes
-   */
-  if (((cmos_minutes < real_minutes) ?
-       (real_minutes - cmos_minutes) :
-       (cmos_minutes - real_minutes)) < 30)
-    {
-      if (!(save_control & RTC_DM_BINARY) || RTC_ALWAYS_BCD)
-	{
-	  BIN_TO_BCD(real_seconds);
-	  BIN_TO_BCD(real_minutes);
-	}
-      CMOS_WRITE(real_seconds,RTC_SECONDS);
-      CMOS_WRITE(real_minutes,RTC_MINUTES);
-    }
-  else
-    retval = -1;
-
-  CMOS_WRITE(save_freq_select, RTC_FREQ_SELECT);
-  CMOS_WRITE(save_control, RTC_CONTROL);
-  return retval;
+	if(copy_from_user(&txc, txc_p, sizeof(struct timex)))
+		return -EFAULT;
+	ret = do_adjtimex(&txc);
+	return copy_to_user(txc_p, &txc, sizeof(struct timex)) ? -EFAULT : ret;
 }

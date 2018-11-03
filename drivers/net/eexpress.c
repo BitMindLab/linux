@@ -1,38 +1,104 @@
-/* eexpress.c: Intel EtherExpress device driver for Linux. */
+/* Intel EtherExpress 16 device driver for Linux
+ *
+ * Written by John Sullivan, 1995
+ *  based on original code by Donald Becker, with changes by
+ *  Alan Cox and Pauline Middelink.
+ *
+ * Support for 8-bit mode by Zoltan Szilagyi <zoltans@cs.arizona.edu>
+ *
+ * Many modifications, and currently maintained, by
+ *  Philip Blundell <Philip.Blundell@pobox.com>
+ * Added the Compaq LTE  Alan Cox <alan@redhat.com>
+ * Added MCA support Adam Fritzler <mid@auk.cx>
+ *
+ * Note - this driver is experimental still - it has problems on faster
+ * machines. Someone needs to sit down and go through it line by line with
+ * a databook...
+ */
+
+/* The EtherExpress 16 is a fairly simple card, based on a shared-memory
+ * design using the i82586 Ethernet coprocessor.  It bears no relationship,
+ * as far as I know, to the similarly-named "EtherExpress Pro" range.
+ *
+ * Historically, Linux support for these cards has been very bad.  However,
+ * things seem to be getting better slowly.
+ */
+
+/* If your card is confused about what sort of interface it has (eg it
+ * persistently reports "10baseT" when none is fitted), running 'SOFTSET /BART'
+ * or 'SOFTSET /LISA' from DOS seems to help.
+ */
+
+/* Here's the scoop on memory mapping.
+ *
+ * There are three ways to access EtherExpress card memory: either using the
+ * shared-memory mapping, or using PIO through the dataport, or using PIO
+ * through the "shadow memory" ports.
+ *
+ * The shadow memory system works by having the card map some of its memory
+ * as follows:
+ *
+ * (the low five bits of the SMPTR are ignored)
+ *
+ *  base+0x4000..400f      memory at SMPTR+0..15
+ *  base+0x8000..800f      memory at SMPTR+16..31
+ *  base+0xc000..c007      dubious stuff (memory at SMPTR+16..23 apparently)
+ *  base+0xc008..c00f      memory at 0x0008..0x000f
+ *
+ * This last set (the one at c008) is particularly handy because the SCB
+ * lives at 0x0008.  So that set of ports gives us easy random access to data
+ * in the SCB without having to mess around setting up pointers and the like.
+ * We always use this method to access the SCB (via the scb_xx() functions).
+ *
+ * Dataport access works by aiming the appropriate (read or write) pointer
+ * at the first address you're interested in, and then reading or writing from
+ * the dataport.  The pointers auto-increment after each transfer.  We use
+ * this for data transfer.
+ *
+ * We don't use the shared-memory system because it allegedly doesn't work on
+ * all cards, and because it's a bit more prone to go wrong (it's one more
+ * thing to configure...).
+ */
+
+/* Known bugs:
+ *
+ * - The card seems to want to give us two interrupts every time something
+ *   happens, where just one would be better.
+ */
+
 /*
-	Written 1993 by Donald Becker.
-	Copyright 1993 United States Government as represented by the Director,
-	National Security Agency.  This software may only be used and distributed
-	according to the terms of the GNU Public License as modified by SRC,
-	incorported herein by reference.
+ *
+ * Note by Zoltan Szilagyi 10-12-96:
+ *
+ * I've succeeded in eliminating the "CU wedged" messages, and hence the
+ * lockups, which were only occurring with cards running in 8-bit mode ("force
+ * 8-bit operation" in Intel's SoftSet utility). This version of the driver
+ * sets the 82586 and the ASIC to 8-bit mode at startup; it also stops the
+ * CU before submitting a packet for transmission, and then restarts it as soon
+ * as the process of handing the packet is complete. This is definitely an
+ * unnecessary slowdown if the card is running in 16-bit mode; therefore one
+ * should detect 16-bit vs 8-bit mode from the EEPROM settings and act 
+ * accordingly. In 8-bit mode with this bugfix I'm getting about 150 K/s for
+ * ftp's, which is significantly better than I get in DOS, so the overhead of
+ * stopping and restarting the CU with each transmit is not prohibitive in
+ * practice.
+ *
+ * Update by David Woodhouse 11/5/99:
+ *
+ * I've seen "CU wedged" messages in 16-bit mode, on the Alpha architecture.
+ * I assume that this is because 16-bit accesses are actually handled as two
+ * 8-bit accesses.
+ */
 
-	The author may be reached as becker@super.org or
-	C/O Supercomputing Research Ctr., 17100 Science Dr., Bowie MD 20715
-
-	Things remaining to do:
-	Check that the 586 and ASIC are reset/unreset at the right times.
-	Check tx and rx buffer setup.
-	The current Tx is single-buffer-only.
-	Move the theory of operation and memory map documentation.
-	Rework the board error reset
-	The statistics need to be updated correctly.
-*/
-
-static char *version =
-	"eexpress.c:v0.07 1/19/94 Donald Becker (becker@super.org)\n";
-
+#ifdef __alpha__
+#define LOCKUP16 1
+#endif
+#ifndef LOCKUP16
+#define LOCKUP16 0
+#endif
+  
 #include <linux/config.h>
-
-/*
-  Sources:
-	This driver wouldn't have been written with the availability of the
-	Crynwr driver source code.	It provided a known-working implementation
-	that filled in the gaping holes of the Intel documention.  Three cheers
-	for Russ Nelson.
-
-	Intel Microcommunications Databook, Vol. 1, 1990. It provides just enough
-	info that the casual reader might think that it documents the i82586.
-*/
+#include <linux/module.h>
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -41,1008 +107,1577 @@ static char *version =
 #include <linux/interrupt.h>
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
+#include <linux/string.h>
 #include <linux/in.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
-#include <asm/dma.h>
-#include <errno.h>
-#include <memory.h>
+#include <asm/irq.h>
+#include <linux/delay.h>
+#include <linux/errno.h>
+#include <linux/init.h>
 
-#include "dev.h"
-#include "eth.h"
-#include "skbuff.h"
-#include "arp.h"
-
-#ifndef HAVE_ALLOC_SKB
-#define alloc_skb(size, priority) (struct sk_buff *) kmalloc(size,priority)
-#else
-/* This isn't quite right, but it's the best version define I can find right now. */
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/skbuff.h>
 #include <linux/malloc.h>
-#endif
+#include <linux/mca.h>
 
-/* use 0 for production, 1 for verification, 2..7 for debug */
+#include <linux/spinlock.h>
+
 #ifndef NET_DEBUG
-#define NET_DEBUG 2
+#define NET_DEBUG 4
 #endif
-static unsigned int net_debug = NET_DEBUG;
+
+#include "eexpress.h"
+
+#define EEXP_IO_EXTENT  16
 
 /*
-  			Details of the i82586.
-
-   You'll really need the databook to understand the details of this part,
-   but the outline is that the i82586 has two seperate processing units.
-
-   The Rx unit uses a list of frame descriptors and a list of data buffer
-   descriptors.  We use full-sized (1518 byte) data buffers, so there is
-   a one-to-one pairing of frame descriptors to buffer descriptors.
-
-   The Tx ("command") unit executes a list of commands that look like:
-		Status word		Written by the 82586 when the command is done.
-		Command word	Command in lower 3 bits, post-command action in upper 3
-		Link word		The address of the next command.
-		Parameters		(as needed).
-
-	Some definitions related to the Command Word are:
+ * Private data declarations
  */
-#define CMD_EOL		0x8000			/* The last command of the list, stop. */
-#define CMD_SUSP	0x4000			/* Suspend after doing cmd. */
-#define CMD_INTR	0x2000			/* Interrupt after doing cmd. */
 
-enum commands {
-	CmdNOp = 0, CmdSASetup = 1, CmdConfigure = 2, CmdMulticastList = 3,
-	CmdTx = 4, CmdTDR = 5, CmdDump = 6, CmdDiagnose = 7};
-
-/* Information that need to be kept for each board. */
-struct net_local {
-	struct enet_statistics stats;
-	int last_restart;
-	short rx_head;
-	short rx_tail;
-	short tx_head;
-	short tx_cmd_link;
-	short tx_reap;
-};
-
-/*
-  		Details of the EtherExpress Implementation
-  The EtherExpress takes an unusual approach to host access to packet buffer
-  memory.  The host can use either the Dataport, with independent
-  autoincrementing read and write pointers, or it can I/O map 32 bytes of the
-  memory using the "Shadow Memory Pointer" (SMB) as follows:
-			ioaddr						Normal EtherExpress registers
-			ioaddr+0x4000...0x400f		Buffer Memory at SMB...SMB+15
-			ioaddr+0x8000...0x800f		Buffer Memory at SMB+16...SMB+31
-			ioaddr+0xC000...0xC007		"" SMB+16...SMB+23 (hardware flaw?)
-			ioaddr+0xC008...0xC00f		Buffer Memory at 0x0008...0x000f
-  The last I/O map set is useful if you put the i82586 System Command Block
-  (the command mailbox) exactly at 0x0008.  (There seems to be some
-  undocumented init structure at 0x0000-7, so I had to use the Crywnr memory
-  setup verbatim for those four words anyway.)
-
-  A problem with using either one of these mechanisms is that you must run
-  single-threaded, or the interrupt handler must restore a changed value of
-  the read, write, or SMB pointers.
-
-  Unlike the Crynwr driver, my driver mostly ignores the I/O mapped "feature"
-  and relies heavily on the dataport for buffer memory access.  To minimize
-  switching, the read_pointer is dedicated to the Rx interrupt handler, and
-  the write_pointer is used by the send_packet() routine (it's carefully saved
-  and restored when it's needed by the interrupt handler).
-  */
-
-/* Offsets from the base I/O address. */
-#define DATAPORT	0	/* Data Transfer Register. */
-#define WRITE_PTR	2	/* Write Address Pointer. */
-#define READ_PTR	4	/* Read Address Pointer. */
-#define SIGNAL_CA	6	/* Frob the 82586 Channel Attention line. */
-#define SET_IRQ		7	/* IRQ Select. */
-#define SHADOW_PTR	8	/* Shadow Memory Bank Pointer. */
-#define MEM_Ctrl	11
-#define MEM_Page_Ctrl	12
-#define Config		13
-#define EEPROM_Ctrl		14
-#define ID_PORT		15
-
-/*	EEPROM_Ctrl bits. */
-
-#define EE_SHIFT_CLK	0x01	/* EEPROM shift clock. */
-#define EE_CS			0x02	/* EEPROM chip select. */
-#define EE_DATA_WRITE	0x04	/* EEPROM chip data in. */
-#define EE_DATA_READ	0x08	/* EEPROM chip data out. */
-#define EE_CTRL_BITS	(EE_SHIFT_CLK | EE_CS | EE_DATA_WRITE | EE_DATA_READ)
-#define ASIC_RESET		0x40
-#define _586_RESET		0x80
-
-/* Offsets to elements of the System Control Block structure. */
-#define SCB_STATUS	0xc008
-#define SCB_CMD		0xc00A
-#define	 CUC_START	 0x0100
-#define	 CUC_RESUME	 0x0200
-#define	 CUC_SUSPEND 0x0300
-#define	 RX_START	 0x0010
-#define	 RX_RESUME	 0x0020
-#define	 RX_SUSPEND	 0x0030
-#define SCB_CBL		0xc00C	/* Command BLock offset. */
-#define SCB_RFA		0xc00E	/* Rx Frame Area offset. */
-
-/*
-  What follows in 'init_words[]' is the "program" that is downloaded to the
-  82586 memory.	 It's mostly tables and command blocks, and starts at the
-  reset address 0xfffff6.
-
-  Even with the additional "don't care" values, doing it this way takes less
-  program space than initializing the individual tables, and I feel it's much
-  cleaner.
-
-  The databook is particularly useless for the first two structures; they are
-  completely undocumented.  I had to use the Crynwr driver as an example.
-
-   The memory setup is as follows:
-   */
-
-#define CONFIG_CMD	0x0018
-#define SET_SA_CMD	0x0024
-#define SA_OFFSET	0x002A
-#define IDLELOOP	0x30
-#define TDR_CMD		0x38
-#define TDR_TIME	0x3C
-#define DUMP_CMD	0x40
-#define DIAG_CMD	0x48
-#define SET_MC_CMD	0x4E
-#define DUMP_DATA	0x56	/* A 170 byte buffer for dump and Set-MC into. */
-
-#define TX_BUF_START	0x0100
-#define NUM_TX_BUFS 	4
-#define TX_BUF_SIZE		0x0680	/* packet+header+TBD+extra (1518+14+20+16) */
-#define TX_BUF_END		0x2000
-
-#define RX_BUF_START	0x2000
-#define RX_BUF_SIZE 	(0x640)	/* packet+header+RBD+extra */
-#define RX_BUF_END		0x4000
-
-/*
-  That's it: only 86 bytes to set up the beast, including every extra
-  command available.  The 170 byte buffer at DUMP_DATA is shared between the
-  Dump command (called only by the diagnostic program) and the SetMulticastList
-  command.
-
-  To complete the memory setup you only have to write the station address at
-  SA_OFFSET and create the Tx & Rx buffer lists.
-
-  The Tx command chain and buffer list is setup as follows:
-  A Tx command table, with the data buffer pointing to...
-  A Tx data buffer descriptor.  The packet is in a single buffer, rather than
-     chaining together several smaller buffers.
-  A NoOp command, which initially points to itself,
-  And the packet data.
-
-  A transmit is done by filling in the Tx command table and data buffer,
-  re-writing the NoOp command, and finally changing the offset of the last
-  command to point to the current Tx command.  When the Tx command is finished,
-  it jumps to the NoOp, when it loops until the next Tx command changes the
-  "link offset" in the NoOp.  This way the 82586 never has to go through the
-  slow restart sequence.
-
-  The Rx buffer list is set up in the obvious ring structure.  We have enough
-  memory (and low enough interrupt latency) that we can avoid the complicated
-  Rx buffer linked lists by alway associating a full-size Rx data buffer with
-  each Rx data frame.
-
-  I current use four transmit buffers starting at TX_BUF_START (0x0100), and
-  use the rest of memory, from RX_BUF_START to RX_BUF_END, for Rx buffers.
-
-  */
-
-static short init_words[] = {
-	0x0000,					/* Set bus size to 16 bits. */
-	0x0000,0x0000,			/* Set control mailbox (SCB) addr. */
-	0,0,					/* pad to 0x000000. */
-	0x0001,					/* Status word that's cleared when init is done. */
-	0x0008,0,0,				/* SCB offset, (skip, skip) */
-
-	0,0xf000|RX_START|CUC_START,	/* SCB status and cmd. */
-	CONFIG_CMD,				/* Command list pointer, points to Configure. */
-	RX_BUF_START,				/* Rx block list. */
-	0,0,0,0,				/* Error count: CRC, align, buffer, overrun. */
-
-	/* 0x0018: Configure command.  Change to put MAC data with packet. */
-	0, CmdConfigure,		/* Status, command.		*/
-	SET_SA_CMD,				/* Next command is Set Station Addr. */
-	0x0804,					/* "4" bytes of config data, 8 byte FIFO. */
-	0x2e40,					/* Magic values, including MAC data location. */
-	0,						/* Unused pad word. */
-
-	/* 0x0024: Setup station address command. */
-	0, CmdSASetup,
-	SET_MC_CMD,				/* Next command. */
-	0xaa00,0xb000,0x0bad,	/* Station address (to be filled in) */
-
-	/* 0x0030: NOP, looping back to itself.	 Point to first Tx buffer to Tx. */
-	0, CmdNOp, IDLELOOP, 0 /* pad */,
-
-	/* 0x0038: A unused Time-Domain Reflectometer command. */
-	0, CmdTDR, IDLELOOP, 0,
-
-	/* 0x0040: An unused Dump State command. */
-	0, CmdDump, IDLELOOP, DUMP_DATA,
-
-	/* 0x0048: An unused Diagnose command. */
-	0, CmdDiagnose, IDLELOOP,
-
-	/* 0x004E: An empty set-multicast-list command. */
-#ifdef initial_text_tx
-	0, CmdMulticastList, DUMP_DATA, 0,
-#else
-	0, CmdMulticastList, IDLELOOP, 0,
-#endif
-
-	/* 0x0056: A continuous transmit command, only here for testing. */
-	0, CmdTx, DUMP_DATA, DUMP_DATA+8, 0x83ff, -1, DUMP_DATA, 0,
-};
-
-/* Index to functions, as function prototypes. */
-
-extern int express_probe(struct device *dev);	/* Called from Space.c */
-
-static int	eexp_probe1(struct device *dev, short ioaddr);
-static int	eexp_open(struct device *dev);
-static int	eexp_send_packet(struct sk_buff *skb, struct device *dev);
-static void	eexp_interrupt(int reg_ptr);
-static void eexp_rx(struct device *dev);
-static int	eexp_close(struct device *dev);
-static struct enet_statistics *eexp_get_stats(struct device *dev);
-#ifdef HAVE_MULTICAST
-static void set_multicast_list(struct device *dev, int num_addrs, void *addrs);
-#endif
-
-static int read_eeprom(int ioaddr, int location);
-static void hardware_send_packet(struct device *dev, void *buf, short length);
-static void init_82586_mem(struct device *dev);
-static void init_rx_bufs(struct device *dev);
-
-
-/* Check for a network adaptor of this type, and return '0' iff one exists.
-   If dev->base_addr == 0, probe all likely locations.
-   If dev->base_addr == 1, always return failure.
-   If dev->base_addr == 2, (detachable devices only) alloate space for the
-   device and return success.
-   */
-int
-express_probe(struct device *dev)
+struct net_local
 {
-	/* Don't probe all settable addresses, 0x[23][0-7]0, just common ones. */
-	int *port, ports[] = {0x300, 0x270, 0x320, 0x340, 0};
-	int base_addr = dev->base_addr;
+	struct net_device_stats stats;
+	unsigned long last_tx;       /* jiffies when last transmit started */
+	unsigned long init_time;     /* jiffies when eexp_hw_init586 called */
+	unsigned short rx_first;     /* first rx buf, same as RX_BUF_START */
+	unsigned short rx_last;      /* last rx buf */
+	unsigned short rx_ptr;       /* first rx buf to look at */
+	unsigned short tx_head;      /* next free tx buf */
+	unsigned short tx_reap;      /* first in-use tx buf */
+	unsigned short tx_tail;      /* previous tx buf to tx_head */
+	unsigned short tx_link;      /* last known-executing tx buf */
+	unsigned short last_tx_restart;   /* set to tx_link when we
+					     restart the CU */
+	unsigned char started;
+	unsigned short rx_buf_start;
+	unsigned short rx_buf_end;
+	unsigned short num_tx_bufs;
+	unsigned short num_rx_bufs;
+	unsigned char width;         /* 0 for 16bit, 1 for 8bit */
+	unsigned char was_promisc;
+	unsigned char old_mc_count;
+	spinlock_t lock;
+};
 
-	if (base_addr > 0x1ff)	/* Check a single specified location. */
-		return eexp_probe1(dev, base_addr);
-	else if (base_addr > 0)
-		return ENXIO;		/* Don't probe at all. */
+/* This is the code and data that is downloaded to the EtherExpress card's
+ * memory at boot time.
+ */
 
-	for (port = &ports[0]; *port; port++) {
-		short id_addr = *port + ID_PORT;
-		unsigned short sum = 0;
-		int i;
-#ifdef notdef
-		for (i = 16; i > 0; i--)
-			sum += inb(id_addr);
-		printk("EtherExpress ID checksum is %04x.\n", sum);
-#else
-		for (i = 4; i > 0; i--) {
-			short id_val = inb(id_addr);
-			sum |= (id_val >> 4) << ((id_val & 3) << 2);
+static unsigned short start_code[] = {
+/* 0x0000 */
+	0x0001,                 /* ISCP: busy - cleared after reset */
+	0x0008,0x0000,0x0000,   /* offset,address (lo,hi) of SCB */
+
+	0x0000,0x0000,          /* SCB: status, commands */
+	0x0000,0x0000,          /* links to first command block,
+				   first receive descriptor */
+	0x0000,0x0000,          /* CRC error, alignment error counts */
+	0x0000,0x0000,          /* out of resources, overrun error counts */
+
+	0x0000,0x0000,          /* pad */
+	0x0000,0x0000,
+
+/* 0x20 -- start of 82586 CU program */
+#define CONF_LINK 0x20
+	0x0000,Cmd_Config,      
+	0x0032,                 /* link to next command */
+	0x080c,                 /* 12 bytes follow : fifo threshold=8 */
+	0x2e40,                 /* don't rx bad frames
+				 * SRDY/ARDY => ext. sync. : preamble len=8
+	                         * take addresses from data buffers
+				 * 6 bytes/address
+				 */
+	0x6000,                 /* default backoff method & priority
+				 * interframe spacing = 0x60 */
+	0xf200,                 /* slot time=0x200 
+				 * max collision retry = 0xf */
+#define CONF_PROMISC  0x2e
+	0x0000,                 /* no HDLC : normal CRC : enable broadcast 
+				 * disable promiscuous/multicast modes */
+	0x003c,                 /* minimum frame length = 60 octets) */
+
+	0x0000,Cmd_SetAddr,
+	0x003e,                 /* link to next command */
+#define CONF_HWADDR  0x38
+	0x0000,0x0000,0x0000,   /* hardware address placed here */
+
+	0x0000,Cmd_MCast,
+	0x0076,                 /* link to next command */
+#define CONF_NR_MULTICAST 0x44
+	0x0000,                 /* number of multicast addresses */
+#define CONF_MULTICAST 0x46
+	0x0000, 0x0000, 0x0000, /* some addresses */
+	0x0000, 0x0000, 0x0000,
+	0x0000, 0x0000, 0x0000,
+	0x0000, 0x0000, 0x0000,
+	0x0000, 0x0000, 0x0000,
+	0x0000, 0x0000, 0x0000,
+	0x0000, 0x0000, 0x0000,
+	0x0000, 0x0000, 0x0000,
+
+#define CONF_DIAG_RESULT  0x76
+	0x0000, Cmd_Diag,
+	0x007c,                 /* link to next command */
+
+	0x0000,Cmd_TDR|Cmd_INT,
+	0x0084,
+#define CONF_TDR_RESULT  0x82
+	0x0000,
+
+	0x0000,Cmd_END|Cmd_Nop, /* end of configure sequence */
+	0x0084                  /* dummy link */
+};
+
+/* maps irq number to EtherExpress magic value */
+static char irqrmap[] = { 0,0,1,2,3,4,0,0,0,1,5,6,0,0,0,0 };
+
+#ifdef CONFIG_MCA
+/* mapping of the first four bits of the second POS register */
+static unsigned short mca_iomap[] = {
+	0x270, 0x260, 0x250, 0x240, 0x230, 0x220, 0x210, 0x200,
+	0x370, 0x360, 0x350, 0x340, 0x330, 0x320, 0x310, 0x300
+};
+/* bits 5-7 of the second POS register */
+static char mca_irqmap[] = { 12, 9, 3, 4, 5, 10, 11, 15 };
+#endif 
+
+/*
+ * Prototypes for Linux interface
+ */
+
+extern int express_probe(struct net_device *dev);
+static int eexp_open(struct net_device *dev);
+static int eexp_close(struct net_device *dev);
+static void eexp_timeout(struct net_device *dev);
+static struct net_device_stats *eexp_stats(struct net_device *dev);
+static int eexp_xmit(struct sk_buff *buf, struct net_device *dev);
+
+static void eexp_irq(int irq, void *dev_addr, struct pt_regs *regs);
+static void eexp_set_multicast(struct net_device *dev);
+
+/*
+ * Prototypes for hardware access functions
+ */
+
+static void eexp_hw_rx_pio(struct net_device *dev);
+static void eexp_hw_tx_pio(struct net_device *dev, unsigned short *buf,
+		       unsigned short len);
+static int eexp_hw_probe(struct net_device *dev,unsigned short ioaddr);
+static unsigned short eexp_hw_readeeprom(unsigned short ioaddr,
+					 unsigned char location);
+
+static unsigned short eexp_hw_lasttxstat(struct net_device *dev);
+static void eexp_hw_txrestart(struct net_device *dev);
+
+static void eexp_hw_txinit    (struct net_device *dev);
+static void eexp_hw_rxinit    (struct net_device *dev);
+
+static void eexp_hw_init586   (struct net_device *dev);
+static void eexp_setup_filter (struct net_device *dev);
+
+static char *eexp_ifmap[]={"AUI", "BNC", "RJ45"};
+enum eexp_iftype {AUI=0, BNC=1, TPE=2};
+
+#define STARTED_RU      2
+#define STARTED_CU      1
+
+/*
+ * Primitive hardware access functions.
+ */
+
+static inline unsigned short scb_status(struct net_device *dev)
+{
+	return inw(dev->base_addr + 0xc008);
+}
+
+static inline unsigned short scb_rdcmd(struct net_device *dev)
+{
+	return inw(dev->base_addr + 0xc00a);
+}
+
+static inline void scb_command(struct net_device *dev, unsigned short cmd)
+{
+	outw(cmd, dev->base_addr + 0xc00a);
+}
+
+static inline void scb_wrcbl(struct net_device *dev, unsigned short val)
+{
+	outw(val, dev->base_addr + 0xc00c);
+}
+
+static inline void scb_wrrfa(struct net_device *dev, unsigned short val)
+{
+	outw(val, dev->base_addr + 0xc00e);
+}
+
+static inline void set_loopback(struct net_device *dev)
+{
+	outb(inb(dev->base_addr + Config) | 2, dev->base_addr + Config);
+}
+
+static inline void clear_loopback(struct net_device *dev)
+{
+	outb(inb(dev->base_addr + Config) & ~2, dev->base_addr + Config);
+}
+
+static inline unsigned short int SHADOW(short int addr)
+{
+	addr &= 0x1f;
+	if (addr > 0xf) addr += 0x3ff0;
+	return addr + 0x4000;
+}
+
+/*
+ * Linux interface
+ */
+
+/*
+ * checks for presence of EtherExpress card
+ */
+
+int __init express_probe(struct net_device *dev)
+{
+	unsigned short *port;
+	static unsigned short ports[] = { 0x300,0x310,0x270,0x320,0x340,0 };
+	unsigned short ioaddr = dev->base_addr;
+
+	SET_MODULE_OWNER(dev);
+
+	dev->if_port = 0xff; /* not set */
+
+#ifdef CONFIG_MCA
+	if (MCA_bus) {
+		int slot = 0;
+
+		/*
+		 * Only find one card at a time.  Subsequent calls
+		 * will find others, however, proper multicard MCA
+		 * probing and setup can't be done with the
+		 * old-style Space.c init routines.  -- ASF
+		 */
+		while (slot != MCA_NOTFOUND) {
+			int pos0, pos1;
+			
+			slot = mca_find_unused_adapter(0x628B, slot);
+			if (slot == MCA_NOTFOUND)
+				break;
+
+			pos0 = mca_read_stored_pos(slot, 2);
+			pos1 = mca_read_stored_pos(slot, 3);
+			ioaddr = mca_iomap[pos1&0xf];
+
+			dev->irq = mca_irqmap[(pos1>>4)&0x7];
+			
+			/*
+			 * XXX: Transciever selection is done
+			 * differently on the MCA version.  
+			 * How to get it to select something
+			 * other than external/AUI is currently
+			 * unknown.  This code is just for looks. -- ASF
+			 */
+			if ((pos0 & 0x7) == 0x1)
+				dev->if_port = AUI;
+			else if ((pos0 & 0x7) == 0x5) {
+				if (pos1 & 0x80)
+					dev->if_port = BNC;
+				else
+					dev->if_port = TPE;
+			}
+
+			mca_set_adapter_name(slot, "Intel EtherExpress 16 MCA");
+			mca_set_adapter_procfn(slot, NULL, dev);
+			mca_mark_as_used(slot);
+
+			break;
 		}
+	}
 #endif
-		if (sum == 0xbaba
-			&& eexp_probe1(dev, *port) == 0)
-			return 0;
-	}
-
-	return ENODEV;			/* ENODEV would be more accurate. */
-}
-
-int eexp_probe1(struct device *dev, short ioaddr)
-{
-	unsigned short station_addr[3];
-	int i;
-
-	printk("%s: EtherExpress at %#x,", dev->name, ioaddr);
-
-	/* The station address is stored !backwards! in the EEPROM, reverse
-	   after reading.  (Hmmm, a little brain-damage there at Intel, eh?) */
-	station_addr[0] = read_eeprom(ioaddr, 2);
-	station_addr[1] = read_eeprom(ioaddr, 3);
-	station_addr[2] = read_eeprom(ioaddr, 4);
-
-	/* Check the first three octets of the S.A. for the manufactor's code. */
-	if (station_addr[2] != 0x00aa || (station_addr[1] & 0xff00) != 0x0000) {
-		printk(" rejected (invalid address %04x%04x%04x).\n",
-			   station_addr[2], station_addr[1], station_addr[0]);
-		return ENODEV;
-	}
-
-	/* We've committed to using the board, and can start filling in *dev. */
-	snarf_region(ioaddr, 16);
-	dev->base_addr = ioaddr;
-
-	for (i = 0; i < 6; i++) {
-		dev->dev_addr[i] = ((unsigned char*)station_addr)[5-i];
-		printk(" %02x", dev->dev_addr[i]);
-	}
-
-	/* There is no reason for the driver to care, but I print out the
-	   interface to minimize bogus bug reports. */
-	{
-		char irqmap[] = {0, 9, 3, 4, 5, 10, 11, 0};
-		char *ifmap[] = {"AUI", "BNC", "10baseT"};
-		enum iftype {AUI=0, BNC=1, TP=2};
-		unsigned short setupval = read_eeprom(ioaddr, 0);
-
-		dev->irq = irqmap[setupval >> 13];
-		dev->if_port = (setupval & 0x1000) == 0 ? AUI :
-			read_eeprom(ioaddr, 5) & 0x1 ? TP : BNC;
-		printk(", IRQ %d, Interface %s.\n", dev->irq, ifmap[dev->if_port]);
-		/* Release the IRQ line so that it can be shared if we don't use the
-		   ethercard. */
-		outb(0x00, ioaddr + SET_IRQ);
-	}
-
-	/* It's now OK to leave the board in reset, pending the open(). */
-	outb(ASIC_RESET, ioaddr + EEPROM_Ctrl);
-
-	if ((dev->mem_start & 0xf) > 0)
-		net_debug = dev->mem_start & 7;
-
-	if (net_debug)
-		printk(version);
-
-	/* Initialize the device structure. */
-	dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
-	memset(dev->priv, 0, sizeof(struct net_local));
-
-	dev->open		= eexp_open;
-	dev->stop		= eexp_close;
-	dev->hard_start_xmit = eexp_send_packet;
-	dev->get_stats	= eexp_get_stats;
-#ifdef HAVE_MULTICAST
-	dev->set_multicast_list = &set_multicast_list;
-#endif
-
-	/* Fill in the fields of the device structure with ethernet-generic values.
-	   This should be in a common file instead of per-driver.  */
-	for (i = 0; i < DEV_NUMBUFFS; i++)
-		dev->buffs[i] = NULL;
-
-	dev->hard_header	= eth_header;
-	dev->add_arp	= eth_add_arp;
-	dev->queue_xmit = dev_queue_xmit;
-	dev->rebuild_header = eth_rebuild_header;
-	dev->type_trans = eth_type_trans;
-
-	dev->type		= ARPHRD_ETHER;
-	dev->hard_header_len = ETH_HLEN;
-	dev->mtu		= 1500; /* eth_mtu */
-	dev->addr_len	= ETH_ALEN;
-	for (i = 0; i < ETH_ALEN; i++) {
-		dev->broadcast[i]=0xff;
-	}
-
-	/* New-style flags. */
-	dev->flags		= IFF_BROADCAST;
-	dev->family		= AF_INET;
-	dev->pa_addr	= 0;
-	dev->pa_brdaddr = 0;
-	dev->pa_mask	= 0;
-	dev->pa_alen	= sizeof(unsigned long);
-
-	return 0;
-}
-
-
-/* Reverse IRQ map: the value to put in the SET_IRQ reg. for IRQ<index>. */
-static char irqrmap[]={0,0,1,2,3,4,0,0,0,1,5,6,0,0,0,0};
-
-static int
-eexp_open(struct device *dev)
-{
-	int ioaddr = dev->base_addr;
-
-	if (dev->irq == 0  ||  irqrmap[dev->irq] == 0)
+	if (ioaddr&0xfe00)
+		return eexp_hw_probe(dev,ioaddr);
+	else if (ioaddr)
 		return -ENXIO;
 
-	if (irq2dev_map[dev->irq] != 0
-		/* This is always true, but avoid the false IRQ. */
-		|| (irq2dev_map[dev->irq] = dev) == 0
-		|| request_irq(dev->irq, &eexp_interrupt)) {
-		return -EAGAIN;
+	for (port=&ports[0] ; *port ; port++ )
+	{
+		unsigned short sum = 0;
+		int i;
+		for ( i=0 ; i<4 ; i++ )
+		{
+			unsigned short t;
+			t = inb(*port + ID_PORT);
+			sum |= (t>>4) << ((t & 0x03)<<2);
+		}
+		if (sum==0xbaba && !eexp_hw_probe(dev,*port))
+			return 0;
 	}
-
-	/* Initialize the 82586 memory and start it. */
-	init_82586_mem(dev);
-
-	/* Enable the interrupt line. */
-	outb(irqrmap[dev->irq] | 0x08, ioaddr + SET_IRQ);
-
-	dev->tbusy = 0;
-	dev->interrupt = 0;
-	dev->start = 1;
-	return 0;
+	return -ENODEV;
 }
 
-static int
-eexp_send_packet(struct sk_buff *skb, struct device *dev)
+/*
+ * open and initialize the adapter, ready for use
+ */
+
+static int eexp_open(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
-	int ioaddr = dev->base_addr;
-
-	if (dev->tbusy) {
-		/* If we get here, some higher level has decided we are broken.
-		   There should really be a "kick me" function call instead. */
-		int tickssofar = jiffies - dev->trans_start;
-		if (tickssofar < 5)
-			return 1;
-		if (net_debug > 1)
-			printk("%s: transmit timed out, %s?  ", dev->name,
-				   inw(ioaddr+SCB_STATUS) & 0x8000 ? "IRQ conflict" :
-				   "network cable problem");
-		lp->stats.tx_errors++;
-		/* Try to restart the adaptor. */
-		if (lp->last_restart == lp->stats.tx_packets) {
-			if (net_debug > 1) printk("Resetting board.\n");
-			/* Completely reset the adaptor. */
-			init_82586_mem(dev);
-		} else {
-			/* Issue the channel attention signal and hope it "gets better". */
-			if (net_debug > 1) printk("Kicking board.\n");
-			outw(0xf000|CUC_START|RX_START, ioaddr + SCB_CMD);
-			outb(0, ioaddr + SIGNAL_CA);
-			lp->last_restart = lp->stats.tx_packets;
-		}
-		dev->tbusy=0;
-		dev->trans_start = jiffies;
-	}
-
-	/* If some higher layer thinks we've missed an tx-done interrupt
-	   we are passed NULL. Caution: dev_tint() handles the cli()/sti()
-	   itself. */
-	if (skb == NULL) {
-		dev_tint(dev);
-		return 0;
-	}
-
-	/* For ethernet, fill in the header.  This should really be done by a
-	   higher level, rather than duplicated for each ethernet adaptor. */
-	if (!skb->arp  &&  dev->rebuild_header(skb->data, dev)) {
-		skb->dev = dev;
-		arp_queue (skb);
-		return 0;
-	}
-	skb->arp=1;
-
-	/* Block a timer-based transmit from overlapping. */
-	if (set_bit(0, (void*)&dev->tbusy) != 0)
-		printk("%s: Transmitter access conflict.\n", dev->name);
-	else {
-		short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
-		unsigned char *buf = skb->data;
-
-		/* Disable the 82586's input to the interrupt line. */
-		outb(irqrmap[dev->irq], ioaddr + SET_IRQ);
-		hardware_send_packet(dev, buf, length);
-		dev->trans_start = jiffies;
-		/* Enable the 82586 interrupt input. */
-		outb(0x08 | irqrmap[dev->irq], ioaddr + SET_IRQ);
-	}
-
-	if (skb->free)
-		kfree_skb (skb, FREE_WRITE);
-
-	/* You might need to clean up and record Tx statistics here. */
-	lp->stats.tx_aborted_errors++;
-
-	return 0;
-}
-
-/*	The typical workload of the driver:
-	Handle the network interface interrupts. */
-static void
-eexp_interrupt(int reg_ptr)
-{
-	int irq = -(((struct pt_regs *)reg_ptr)->orig_eax+2);
-	struct device *dev = (struct device *)(irq2dev_map[irq]);
-	struct net_local *lp;
-	int ioaddr, status, boguscount = 0;
-	short ack_cmd;
-
-	if (dev == NULL) {
-		printk ("net_interrupt(): irq %d for unknown device.\n", irq);
-		return;
-	}
-	dev->interrupt = 1;
-	
-	ioaddr = dev->base_addr;
-	lp = (struct net_local *)dev->priv;
-	
-	status = inw(ioaddr + SCB_STATUS);
-	
-    if (net_debug > 4) {
-		printk("%s: EExp interrupt, status %4.4x.\n", dev->name, status);
-    }
-
-	/* Disable the 82586's input to the interrupt line. */
-	outb(irqrmap[dev->irq], ioaddr + SET_IRQ);
-
-	/* Reap the Tx packet buffers. */
-	while (lp->tx_reap != lp->tx_head) { 	/* if (status & 0x8000) */
-		unsigned short tx_status;
-		outw(lp->tx_reap, ioaddr + READ_PTR);
-		tx_status = inw(ioaddr);
-		if (tx_status == 0) {
-			if (net_debug > 5)  printk("Couldn't reap %#x.\n", lp->tx_reap);
-			break;
-		}
-		if (tx_status & 0x2000) {
-			lp->stats.tx_packets++;
-			lp->stats.collisions += tx_status & 0xf;
-			dev->tbusy = 0;
-			mark_bh(INET_BH);	/* Inform upper layers. */
-		} else {
-			lp->stats.tx_errors++;
-			if (tx_status & 0x0600)  lp->stats.tx_carrier_errors++;
-			if (tx_status & 0x0100)  lp->stats.tx_fifo_errors++;
-			if (!(tx_status & 0x0040))  lp->stats.tx_heartbeat_errors++;
-			if (tx_status & 0x0020)  lp->stats.tx_aborted_errors++;
-		}
-		if (net_debug > 5)
-			printk("Reaped %x, Tx status %04x.\n" , lp->tx_reap, tx_status);
-		lp->tx_reap += TX_BUF_SIZE;
-		if (lp->tx_reap > TX_BUF_END - TX_BUF_SIZE)
-			lp->tx_reap = TX_BUF_START;
-		if (++boguscount > 4)
-			break;
-	}
-
-	if (status & 0x4000) { /* Packet received. */
-		if (net_debug > 5)
-			printk("Received packet, rx_head %04x.\n", lp->rx_head);
-		eexp_rx(dev);
-	}
-
-	/* Acknowledge the interrupt sources. */
-	ack_cmd = status & 0xf000;
-
-	if ((status & 0x0700) != 0x0200  &&  dev->start) {
-		short saved_write_ptr = inw(ioaddr + WRITE_PTR);
-		if (net_debug > 1)
-			printk("%s: Command unit stopped, status %04x, restarting.\n",
-				   dev->name, status);
-		/* If this ever occurs we must re-write the idle loop, reset
-		   the Tx list, and do a complete restart of the command unit. */
-		outw(IDLELOOP, ioaddr + WRITE_PTR);
-		outw(0, ioaddr);
-		outw(CmdNOp, ioaddr);
-		outw(IDLELOOP, ioaddr);
-		outw(IDLELOOP, SCB_CBL);
-		lp->tx_cmd_link = IDLELOOP + 4;
-		lp->tx_head = lp->tx_reap = TX_BUF_START;
-		/* Restore the saved write pointer. */
-		outw(saved_write_ptr, ioaddr + WRITE_PTR);
-		ack_cmd |= CUC_START;
-	}
-
-	if ((status & 0x0070) != 0x0040  &&  dev->start) {
-		short saved_write_ptr = inw(ioaddr + WRITE_PTR);
-		/* The Rx unit is not ready, it must be hung.  Restart the receiver by
-		   initializing the rx buffers, and issuing an Rx start command. */
-		lp->stats.rx_errors++;
-		if (net_debug > 1) {
-			int cur_rxbuf = RX_BUF_START;
-			printk("%s: Rx unit stopped status %04x rx head %04x tail %04x.\n",
-				   dev->name, status, lp->rx_head, lp->rx_tail);
-			while (cur_rxbuf <= RX_BUF_END - RX_BUF_SIZE) {
-				int i;
-				printk("  Rx buf at %04x:", cur_rxbuf);
-				outw(cur_rxbuf, ioaddr + READ_PTR);
-				for (i = 0; i < 0x20; i += 2)
-					printk(" %04x", inw(ioaddr));
-				printk(".\n");
-				cur_rxbuf += RX_BUF_SIZE;
-			}
-		}
-		init_rx_bufs(dev);
-		outw(RX_BUF_START, SCB_RFA);
-		outw(saved_write_ptr, ioaddr + WRITE_PTR);
-		ack_cmd |= RX_START;
-	}
-
-	outw(ack_cmd, ioaddr + SCB_CMD);
-	outb(0, ioaddr + SIGNAL_CA);
-
-    if (net_debug > 5) {
-		printk("%s: EExp exiting interrupt, status %4.4x.\n", dev->name,
-			   inw(ioaddr + SCB_CMD));
-    }
-	/* Enable the 82586's input to the interrupt line. */
-	outb(irqrmap[dev->irq] | 0x08, ioaddr + SET_IRQ);
-	return;
-}
-
-static int
-eexp_close(struct device *dev)
-{
-	int ioaddr = dev->base_addr;
-
-	dev->tbusy = 1;
-	dev->start = 0;
-
-	/* Flush the Tx and disable Rx. */
-	outw(RX_SUSPEND | CUC_SUSPEND, ioaddr + SCB_CMD);
-	outb(0, ioaddr + SIGNAL_CA);
-
-	/* Disable the physical interrupt line. */
-	outb(0, ioaddr + SET_IRQ);
-
-	free_irq(dev->irq);
-
-	irq2dev_map[dev->irq] = 0;
-
-	/* Update the statistics here. */
-
-	return 0;
-}
-
-/* Get the current statistics.	This may be called with the card open or
-   closed. */
-static struct enet_statistics *
-eexp_get_stats(struct device *dev)
-{
+	int ret;
+	unsigned short ioaddr = dev->base_addr;
 	struct net_local *lp = (struct net_local *)dev->priv;
 
-	/* ToDo: decide if there are any useful statistics from the SCB. */
+#if NET_DEBUG > 6
+	printk(KERN_DEBUG "%s: eexp_open()\n", dev->name);
+#endif
+
+	if (!dev->irq || !irqrmap[dev->irq])
+		return -ENXIO;
+
+	ret = request_irq(dev->irq,&eexp_irq,0,dev->name,dev);
+	if (ret) return ret;
+
+	request_region(ioaddr, EEXP_IO_EXTENT, "EtherExpress");
+	request_region(ioaddr+0x4000, 16, "EtherExpress shadow");
+	request_region(ioaddr+0x8000, 16, "EtherExpress shadow");
+	request_region(ioaddr+0xc000, 16, "EtherExpress shadow");
+	
+	if (lp->width) {
+		printk("%s: forcing ASIC to 8-bit mode\n", dev->name);
+		outb(inb(dev->base_addr+Config)&~4, dev->base_addr+Config);
+	}
+
+	eexp_hw_init586(dev);
+	netif_start_queue(dev);
+#if NET_DEBUG > 6
+	printk(KERN_DEBUG "%s: leaving eexp_open()\n", dev->name);
+#endif
+	return 0;
+}
+
+/*
+ * close and disable the interface, leaving the 586 in reset.
+ */
+
+static int eexp_close(struct net_device *dev)
+{
+	unsigned short ioaddr = dev->base_addr;
+	struct net_local *lp = dev->priv;
+
+	int irq = dev->irq;
+
+	netif_stop_queue(dev);
+	
+	outb(SIRQ_dis|irqrmap[irq],ioaddr+SET_IRQ);
+	lp->started = 0;
+	scb_command(dev, SCB_CUsuspend|SCB_RUsuspend);
+	outb(0,ioaddr+SIGNAL_CA);
+	free_irq(irq,dev);
+	outb(i586_RST,ioaddr+EEPROM_Ctrl);
+	release_region(ioaddr, EEXP_IO_EXTENT);
+	release_region(ioaddr+0x4000, 16);
+	release_region(ioaddr+0x8000, 16);
+	release_region(ioaddr+0xc000, 16);
+
+	return 0;
+}
+
+/*
+ * Return interface stats
+ */
+
+static struct net_device_stats *eexp_stats(struct net_device *dev)
+{
+	struct net_local *lp = (struct net_local *)dev->priv;
 
 	return &lp->stats;
 }
 
-#ifdef HAVE_MULTICAST
-/* Set or clear the multicast filter for this adaptor.
-   num_addrs == -1	Promiscuous mode, receive all packets
-   num_addrs == 0	Normal mode, clear multicast list
-   num_addrs > 0	Multicast mode, receive normal and MC packets, and do
-			best-effort filtering.
+/*
+ * This gets called when a higher level thinks we are broken.  Check that
+ * nothing has become jammed in the CU.
  */
-static void
-set_multicast_list(struct device *dev, int num_addrs, void *addrs)
-{
-	short ioaddr = dev->base_addr;
-	if (num_addrs < 0) {
-		/* Not written yet, this requires expanding the init_words config
-		   cmd. */
-	} else if (num_addrs > 0) {
-		/* Fill in the SET_MC_CMD with the number of address bytes, followed
-		   by the list of multicast addresses to be accepted. */
-		outw(SET_MC_CMD + 6, ioaddr + WRITE_PTR);
-		outw(num_addrs * 6, ioaddr);
-		outsw(ioaddr, addrs, num_addrs*3);		/* 3 = addr len in words */
-		/* We must trigger a whole 586 reset due to a bug. */
-	} else {
-		/* Not written yet, this requires expanding the init_words config
-		   cmd. */
-		outw(99, ioaddr);		/* Disable promiscuous mode, use normal mode */
-	}
-}
-#endif
 
-/* The horrible routine to read a word from the serial EEPROM. */
-
-/* The delay between EEPROM clock transitions. */
-#define eeprom_delay()	{ int _i = 40; while (--_i > 0) { __SLOW_DOWN_IO; }}
-#define EE_READ_CMD (6 << 6)
-
-int
-read_eeprom(int ioaddr, int location)
-{
-	int i;
-	unsigned short retval = 0;
-	short ee_addr = ioaddr + EEPROM_Ctrl;
-	int read_cmd = location | EE_READ_CMD;
-	short ctrl_val = EE_CS | _586_RESET;
-	
-	outb(ctrl_val, ee_addr);
-	
-	/* Shift the read command bits out. */
-	for (i = 8; i >= 0; i--) {
-		short outval = (read_cmd & (1 << i)) ? ctrl_val | EE_DATA_WRITE
-			: ctrl_val;
-		outb(outval, ee_addr);
-		outb(outval | EE_SHIFT_CLK, ee_addr);	/* EEPROM clock tick. */
-		eeprom_delay();
-		outb(outval, ee_addr);	/* Finish EEPROM a clock tick. */
-		eeprom_delay();
-	}
-	outb(ctrl_val, ee_addr);
-	
-	for (i = 16; i > 0; i--) {
-		outb(ctrl_val | EE_SHIFT_CLK, ee_addr);	 eeprom_delay();
-		retval = (retval << 1) | ((inb(ee_addr) & EE_DATA_READ) ? 1 : 0);
-		outb(ctrl_val, ee_addr);  eeprom_delay();
-	}
-
-	/* Terminate the EEPROM access. */
-	ctrl_val &= ~EE_CS;
-	outb(ctrl_val | EE_SHIFT_CLK, ee_addr);
-	eeprom_delay();
-	outb(ctrl_val, ee_addr);
-	eeprom_delay();
-	return retval;
-}
-
-static void
-init_82586_mem(struct device *dev)
+static void unstick_cu(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
-	short ioaddr = dev->base_addr;
+	unsigned short ioaddr = dev->base_addr;
 
-	/* Enable loopback to protect the wire while starting up.
-	   This is Superstition From Crynwr. */
-	outb(inb(ioaddr + Config) | 0x02, ioaddr + Config);
-
-	/* Hold the 586 in reset during the memory initialization. */
-	outb(_586_RESET, ioaddr + EEPROM_Ctrl);
-
-	/* Place the write pointer at 0xfff6 (address-aliased to 0xfffff6). */
-	outw(0xfff6, ioaddr + WRITE_PTR);
-	outsw(ioaddr, init_words, sizeof(init_words)>>1);
-
-	/* Fill in the station address. */
-	outw(SA_OFFSET, ioaddr + WRITE_PTR);
-	outsw(ioaddr, dev->dev_addr, 3);
-
-	/* The Tx-block list is written as needed.  We just set up the values. */
-#ifdef initial_text_tx
-	lp->tx_cmd_link = DUMP_DATA + 4;
-#else
-	lp->tx_cmd_link = IDLELOOP + 4;
-#endif
-	lp->tx_head = lp->tx_reap = TX_BUF_START;
-
-	init_rx_bufs(dev);
-
-	/* Start the 586 by releasing the reset line. */
-	outb(0x00, ioaddr + EEPROM_Ctrl);
-
-	/* This was time consuming to track down: you need to give two channel
-	   attention signals to reliably start up the i82586. */
-	outb(0, ioaddr + SIGNAL_CA);
-
+	if (lp->started)
 	{
-		int boguscnt = 50;
-		while (inw(ioaddr + SCB_STATUS) == 0)
-			if (--boguscnt == 0) {
-				printk("%s: i82586 initialization timed out with status %04x, cmd %04x.\n",
-					   dev->name, inw(ioaddr + SCB_STATUS), inw(ioaddr + SCB_CMD));
-				break;
+		if ((jiffies - dev->trans_start)>50)
+		{
+			if (lp->tx_link==lp->last_tx_restart)
+			{
+				unsigned short boguscount=200,rsst;
+				printk(KERN_WARNING "%s: Retransmit timed out, status %04x, resetting...\n",
+				       dev->name, scb_status(dev));
+				eexp_hw_txinit(dev);
+				lp->last_tx_restart = 0;
+				scb_wrcbl(dev, lp->tx_link);
+				scb_command(dev, SCB_CUstart);
+				outb(0,ioaddr+SIGNAL_CA);
+				while (!SCB_complete(rsst=scb_status(dev)))
+				{
+					if (!--boguscount)
+					{
+						boguscount=200;
+						printk(KERN_WARNING "%s: Reset timed out status %04x, retrying...\n",
+						       dev->name,rsst);
+						scb_wrcbl(dev, lp->tx_link);
+						scb_command(dev, SCB_CUstart);
+						outb(0,ioaddr+SIGNAL_CA);
+					}
+				}
+				netif_wake_queue(dev);
 			}
-		/* Issue channel-attn -- the 82586 won't start without it. */
-		outb(0, ioaddr + SIGNAL_CA);
+			else
+			{
+				unsigned short status = scb_status(dev);
+				if (SCB_CUdead(status))
+				{
+					unsigned short txstatus = eexp_hw_lasttxstat(dev);
+					printk(KERN_WARNING "%s: Transmit timed out, CU not active status %04x %04x, restarting...\n",
+					       dev->name, status, txstatus);
+					eexp_hw_txrestart(dev);
+				}
+				else
+				{
+					unsigned short txstatus = eexp_hw_lasttxstat(dev);
+					if (netif_queue_stopped(dev) && !txstatus)
+					{
+						printk(KERN_WARNING "%s: CU wedged, status %04x %04x, resetting...\n",
+						       dev->name,status,txstatus);
+						eexp_hw_init586(dev);
+						netif_wake_queue(dev);
+					}
+					else
+					{
+						printk(KERN_WARNING "%s: transmit timed out\n", dev->name);
+					}
+				}
+			}
+		}
+	}
+	else
+	{
+		if ((jiffies-lp->init_time)>10)
+		{
+			unsigned short status = scb_status(dev);
+			printk(KERN_WARNING "%s: i82586 startup timed out, status %04x, resetting...\n",
+			       dev->name, status);
+			eexp_hw_init586(dev);
+			netif_wake_queue(dev);
+		}
+	}
+}
+
+static void eexp_timeout(struct net_device *dev)
+{
+	struct net_local *lp = (struct net_local *)dev->priv;
+#ifdef CONFIG_SMP
+	unsigned long flags;
+#endif
+	int status;
+	
+	disable_irq(dev->irq);
+
+	/*
+	 *	Best would be to use synchronize_irq(); spin_lock() here
+	 *	lets make it work first..
+	 */
+	 
+#ifdef CONFIG_SMP
+	spin_lock_irqsave(&lp->lock, flags);
+#endif
+
+	status = scb_status(dev);
+	unstick_cu(dev);
+	printk(KERN_INFO "%s: transmit timed out, %s?", dev->name,
+	       (SCB_complete(status)?"lost interrupt":
+		"board on fire"));
+	lp->stats.tx_errors++;
+	lp->last_tx = jiffies;
+	if (!SCB_complete(status)) {
+		scb_command(dev, SCB_CUabort);
+		outb(0,dev->base_addr+SIGNAL_CA);
+	}
+	netif_wake_queue(dev);	
+#ifdef CONFIG_SMP
+	spin_unlock_irqrestore(&lp->lock, flags);
+#endif
+}
+
+/*
+ * Called to transmit a packet, or to allow us to right ourselves
+ * if the kernel thinks we've died.
+ */
+static int eexp_xmit(struct sk_buff *buf, struct net_device *dev)
+{
+	struct net_local *lp = (struct net_local *)dev->priv;
+#ifdef CONFIG_SMP
+	unsigned long flags;
+#endif
+
+#if NET_DEBUG > 6
+	printk(KERN_DEBUG "%s: eexp_xmit()\n", dev->name);
+#endif
+
+	disable_irq(dev->irq);
+
+	/*
+	 *	Best would be to use synchronize_irq(); spin_lock() here
+	 *	lets make it work first..
+	 */
+	 
+#ifdef CONFIG_SMP
+	spin_lock_irqsave(&lp->lock, flags);
+#endif
+  
+	{
+		unsigned short length = (ETH_ZLEN < buf->len) ? buf->len :
+			ETH_ZLEN;
+		unsigned short *data = (unsigned short *)buf->data;
+
+		lp->stats.tx_bytes += length;
+
+	        eexp_hw_tx_pio(dev,data,length);
+	}
+	dev_kfree_skb(buf);
+#ifdef CONFIG_SMP
+	spin_unlock_irqrestore(&lp->lock, flags);
+#endif
+	enable_irq(dev->irq);
+	return 0;
+}
+
+/*
+ * Handle an EtherExpress interrupt
+ * If we've finished initializing, start the RU and CU up.
+ * If we've already started, reap tx buffers, handle any received packets,
+ * check to make sure we've not become wedged.
+ */
+
+/*
+ * Handle an EtherExpress interrupt
+ * If we've finished initializing, start the RU and CU up.
+ * If we've already started, reap tx buffers, handle any received packets,
+ * check to make sure we've not become wedged.
+ */
+
+static unsigned short eexp_start_irq(struct net_device *dev,
+				     unsigned short status)
+{
+	unsigned short ack_cmd = SCB_ack(status);
+	struct net_local *lp = (struct net_local *)dev->priv;
+	unsigned short ioaddr = dev->base_addr;
+	if ((dev->flags & IFF_UP) && !(lp->started & STARTED_CU)) {
+		short diag_status, tdr_status;
+		while (SCB_CUstat(status)==2)
+			status = scb_status(dev);
+#if NET_DEBUG > 4
+		printk("%s: CU went non-active (status %04x)\n",
+		       dev->name, status);
+#endif
+
+		outw(CONF_DIAG_RESULT & ~31, ioaddr + SM_PTR);
+		diag_status = inw(ioaddr + SHADOW(CONF_DIAG_RESULT));
+		if (diag_status & 1<<11) {
+			printk(KERN_WARNING "%s: 82586 failed self-test\n", 
+			       dev->name);
+		} else if (!(diag_status & 1<<13)) {
+			printk(KERN_WARNING "%s: 82586 self-test failed to complete\n", dev->name);
+		}
+
+		outw(CONF_TDR_RESULT & ~31, ioaddr + SM_PTR);
+		tdr_status = inw(ioaddr + SHADOW(CONF_TDR_RESULT));
+		if (tdr_status & (TDR_SHORT|TDR_OPEN)) {
+			printk(KERN_WARNING "%s: TDR reports cable %s at %d tick%s\n", dev->name, (tdr_status & TDR_SHORT)?"short":"broken", tdr_status & TDR_TIME, ((tdr_status & TDR_TIME) != 1) ? "s" : "");
+		} 
+		else if (tdr_status & TDR_XCVRPROBLEM) {
+			printk(KERN_WARNING "%s: TDR reports transceiver problem\n", dev->name);
+		}
+		else if (tdr_status & TDR_LINKOK) {
+#if NET_DEBUG > 4
+			printk(KERN_DEBUG "%s: TDR reports link OK\n", dev->name);
+#endif
+		} else {
+			printk("%s: TDR is ga-ga (status %04x)\n", dev->name,
+			       tdr_status);
+		}
+			
+		lp->started |= STARTED_CU;
+		scb_wrcbl(dev, lp->tx_link);
+		/* if the RU isn't running, start it now */
+		if (!(lp->started & STARTED_RU)) {
+			ack_cmd |= SCB_RUstart;
+			scb_wrrfa(dev, lp->rx_buf_start);
+			lp->rx_ptr = lp->rx_buf_start;
+			lp->started |= STARTED_RU;
+		}
+		ack_cmd |= SCB_CUstart | 0x2000;
 	}
 
-	/* Disable loopback. */
-	outb(inb(ioaddr + Config) & ~0x02, ioaddr + Config);
-	if (net_debug > 4)
-		printk("%s: Initialized 82586, status %04x.\n", dev->name,
-			   inw(ioaddr + SCB_STATUS));
+	if ((dev->flags & IFF_UP) && !(lp->started & STARTED_RU) && SCB_RUstat(status)==4) 
+		lp->started|=STARTED_RU;
+
+	return ack_cmd;
+}
+
+static void eexp_cmd_clear(struct net_device *dev)
+{
+	unsigned long int oldtime = jiffies;
+	while (scb_rdcmd(dev) && ((jiffies-oldtime)<10));
+	if (scb_rdcmd(dev)) {
+		printk("%s: command didn't clear\n", dev->name);
+	}
+}
+	
+static void eexp_irq(int irq, void *dev_info, struct pt_regs *regs)
+{
+	struct net_device *dev = dev_info;
+	struct net_local *lp;
+	unsigned short ioaddr,status,ack_cmd;
+	unsigned short old_read_ptr, old_write_ptr;
+
+	if (dev==NULL)
+	{
+		printk(KERN_WARNING "eexpress: irq %d for unknown device\n",
+		       irq);
+		return;
+	}
+
+	lp = (struct net_local *)dev->priv;
+	ioaddr = dev->base_addr;
+
+	spin_lock(&lp->lock);
+
+	old_read_ptr = inw(ioaddr+READ_PTR);
+	old_write_ptr = inw(ioaddr+WRITE_PTR);
+
+	outb(SIRQ_dis|irqrmap[irq],ioaddr+SET_IRQ);
+
+	
+	status = scb_status(dev);
+
+#if NET_DEBUG > 4
+	printk(KERN_DEBUG "%s: interrupt (status %x)\n", dev->name, status);
+#endif
+
+	if (lp->started == (STARTED_CU | STARTED_RU)) {
+
+		do {
+			eexp_cmd_clear(dev);
+
+			ack_cmd = SCB_ack(status);
+			scb_command(dev, ack_cmd);
+			outb(0,ioaddr+SIGNAL_CA);
+
+			eexp_cmd_clear(dev);
+
+			if (SCB_complete(status)) {
+				if (!eexp_hw_lasttxstat(dev)) {
+					printk("%s: tx interrupt but no status\n", dev->name);
+				}
+			}
+			
+			if (SCB_rxdframe(status)) 
+				eexp_hw_rx_pio(dev);
+
+			status = scb_status(dev);
+		} while (status & 0xc000);
+
+		if (SCB_RUdead(status)) 
+		{
+			printk(KERN_WARNING "%s: RU stopped: status %04x\n",
+			       dev->name,status);
+#if 0
+			printk(KERN_WARNING "%s: cur_rfd=%04x, cur_rbd=%04x\n", dev->name, lp->cur_rfd, lp->cur_rbd);
+			outw(lp->cur_rfd, ioaddr+READ_PTR);
+			printk(KERN_WARNING "%s: [%04x]\n", dev->name, inw(ioaddr+DATAPORT));
+			outw(lp->cur_rfd+6, ioaddr+READ_PTR);
+			printk(KERN_WARNING "%s: rbd is %04x\n", dev->name, rbd= inw(ioaddr+DATAPORT));
+			outw(rbd, ioaddr+READ_PTR);
+			printk(KERN_WARNING "%s: [%04x %04x] ", dev->name, inw(ioaddr+DATAPORT), inw(ioaddr+DATAPORT));
+			outw(rbd+8, ioaddr+READ_PTR);
+			printk("[%04x]\n", inw(ioaddr+DATAPORT));
+#endif
+			lp->stats.rx_errors++;
+#if 1
+		        eexp_hw_rxinit(dev);
+#else
+			lp->cur_rfd = lp->first_rfd;
+#endif
+			scb_wrrfa(dev, lp->rx_buf_start);
+			scb_command(dev, SCB_RUstart);
+			outb(0,ioaddr+SIGNAL_CA);
+		} 
+	} else {
+		if (status & 0x8000) 
+			ack_cmd = eexp_start_irq(dev, status);
+		else
+			ack_cmd = SCB_ack(status);
+		scb_command(dev, ack_cmd);
+		outb(0,ioaddr+SIGNAL_CA);
+	}
+
+	eexp_cmd_clear(dev);
+
+	outb(SIRQ_en|irqrmap[irq],ioaddr+SET_IRQ); 
+
+#if NET_DEBUG > 6 
+	printk("%s: leaving eexp_irq()\n", dev->name);
+#endif
+	outw(old_read_ptr, ioaddr+READ_PTR);
+	outw(old_write_ptr, ioaddr+WRITE_PTR);
+	
+	spin_unlock(&lp->lock);
 	return;
 }
 
-/* Initialize the Rx-block list. */
-static void init_rx_bufs(struct device *dev)
+/*
+ * Hardware access functions
+ */
+
+/*
+ * Set the cable type to use.
+ */
+
+static void eexp_hw_set_interface(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
-	short ioaddr = dev->base_addr;
-
-	int cur_rxbuf = lp->rx_head = RX_BUF_START;
-	
-	/* Initialize each Rx frame + data buffer. */
-	do {	/* While there is room for one more. */
-		outw(cur_rxbuf, ioaddr + WRITE_PTR);
-		outw(0x0000, ioaddr); 				/* Status */
-		outw(0x0000, ioaddr);				/* Command */
-		outw(cur_rxbuf + RX_BUF_SIZE, ioaddr); /* Link */
-		outw(cur_rxbuf + 22, ioaddr);		/* Buffer offset */
-		outw(0xFeed, ioaddr); 				/* Pad for dest addr. */
-		outw(0xF00d, ioaddr);
-		outw(0xF001, ioaddr);
-		outw(0x0505, ioaddr); 				/* Pad for source addr. */
-		outw(0x2424, ioaddr);
-		outw(0x6565, ioaddr);
-		outw(0xdeaf, ioaddr);				/* Pad for protocol. */
-
-		outw(0x0000, ioaddr);				/* Buffer: Actual count */
-		outw(-1, ioaddr);					/* Buffer: Next (none). */
-		outw(cur_rxbuf + 0x20, ioaddr);		/* Buffer: Address low */
-		outw(0x0000, ioaddr);
-		/* Finally, the number of bytes in the buffer. */
-		outw(0x8000 + RX_BUF_SIZE-0x20, ioaddr);
-		
-		lp->rx_tail = cur_rxbuf;
-		cur_rxbuf += RX_BUF_SIZE;
-	} while (cur_rxbuf <= RX_BUF_END - RX_BUF_SIZE);
-	
-	/* Terminate the list by setting the EOL bit, and wrap the pointer to make
-	   the list a ring. */
-	outw(lp->rx_tail + 2, ioaddr + WRITE_PTR);
-	outw(0xC000, ioaddr);					/* Command, mark as last. */
-	outw(lp->rx_head, ioaddr);				/* Link */
+	unsigned char oldval = inb(dev->base_addr + 0x300e);
+	oldval &= ~0x82;
+	switch (dev->if_port) {
+	case TPE:
+		oldval |= 0x2;
+	case BNC:
+		oldval |= 0x80;
+		break;
+	}
+	outb(oldval, dev->base_addr+0x300e);
+	mdelay(20);
 }
 
-static void
-hardware_send_packet(struct device *dev, void *buf, short length)
+/*
+ * Check all the receive buffers, and hand any received packets
+ * to the upper levels. Basic sanity check on each frame
+ * descriptor, though we don't bother trying to fix broken ones.
+ */
+
+static void eexp_hw_rx_pio(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
-	short ioaddr = dev->base_addr;
-	short tx_block = lp->tx_head;
+	unsigned short rx_block = lp->rx_ptr;
+	unsigned short boguscount = lp->num_rx_bufs;
+	unsigned short ioaddr = dev->base_addr;
+	unsigned short status;
 
-	/* Set the write pointer to the Tx block, and put out the header. */
-	outw(tx_block, ioaddr + WRITE_PTR);
-	outw(0x0000, ioaddr);		/* Tx status */
-	outw(CMD_INTR|CmdTx, ioaddr);		/* Tx command */
-	outw(tx_block+16, ioaddr);	/* Next command is a NoOp. */
-	outw(tx_block+8, ioaddr);	/* Data Buffer offset. */
+#if NET_DEBUG > 6
+	printk(KERN_DEBUG "%s: eexp_hw_rx()\n", dev->name);
+#endif
 
-	/* Output the data buffer descriptor. */
-	outw(length | 0x8000, ioaddr); /* Byte count parameter. */
-	outw(-1, ioaddr);			/* No next data buffer. */
-	outw(tx_block+22, ioaddr);	/* Buffer follows the NoOp command. */
-	outw(0x0000, ioaddr);		/* Buffer address high bits (always zero). */
+ 	do {
+ 		unsigned short rfd_cmd, rx_next, pbuf, pkt_len;
+  
+		outw(rx_block, ioaddr + READ_PTR);
+		status = inw(ioaddr + DATAPORT);
 
-	/* Output the Loop-back NoOp command. */
-	outw(0x0000, ioaddr);		/* Tx status */
-	outw(CmdNOp, ioaddr);		/* Tx command */
-	outw(tx_block+16, ioaddr);	/* Next is myself. */
+		if (FD_Done(status))
+		{
+			rfd_cmd = inw(ioaddr + DATAPORT);
+			rx_next = inw(ioaddr + DATAPORT);
+			pbuf = inw(ioaddr + DATAPORT);
+ 
+			outw(pbuf, ioaddr + READ_PTR);
+			pkt_len = inw(ioaddr + DATAPORT);
 
-	/* Output the packet using the write pointer.
-	   Hmmm, it feels a little like a 3c501! */
-	outsw(ioaddr + DATAPORT, buf, (length + 1) >> 1);
+			if (rfd_cmd!=0x0000)
+  			{
+				printk(KERN_WARNING "%s: rfd_cmd not zero:0x%04x\n",
+				       dev->name, rfd_cmd);
+				continue;
+			}
+			else if (pbuf!=rx_block+0x16)
+			{
+				printk(KERN_WARNING "%s: rfd and rbd out of sync 0x%04x 0x%04x\n", 
+				       dev->name, rx_block+0x16, pbuf);
+				continue;
+			}
+			else if ((pkt_len & 0xc000)!=0xc000) 
+			{
+				printk(KERN_WARNING "%s: EOF or F not set on received buffer (%04x)\n",
+				       dev->name, pkt_len & 0xc000);
+  				continue;
+  			}
+  			else if (!FD_OK(status)) 
+			{
+				lp->stats.rx_errors++;
+				if (FD_CRC(status))
+					lp->stats.rx_crc_errors++;
+				if (FD_Align(status))
+					lp->stats.rx_frame_errors++;
+				if (FD_Resrc(status))
+					lp->stats.rx_fifo_errors++;
+				if (FD_DMA(status))
+					lp->stats.rx_over_errors++;
+				if (FD_Short(status))
+					lp->stats.rx_length_errors++;
+			}
+			else
+			{
+				struct sk_buff *skb;
+				pkt_len &= 0x3fff;
+				skb = dev_alloc_skb(pkt_len+16);
+				if (skb == NULL)
+				{
+					printk(KERN_WARNING "%s: Memory squeeze, dropping packet\n",dev->name);
+					lp->stats.rx_dropped++;
+					break;
+				}
+				skb->dev = dev;
+				skb_reserve(skb, 2);
+				outw(pbuf+10, ioaddr+READ_PTR);
+			        insw(ioaddr+DATAPORT, skb_put(skb,pkt_len),(pkt_len+1)>>1);
+				skb->protocol = eth_type_trans(skb,dev);
+				netif_rx(skb);
+				lp->stats.rx_packets++;
+				lp->stats.rx_bytes += pkt_len;
+			}
+			outw(rx_block, ioaddr+WRITE_PTR);
+			outw(0, ioaddr+DATAPORT);
+			outw(0, ioaddr+DATAPORT);
+			rx_block = rx_next;
+		}
+	} while (FD_Done(status) && boguscount--);
+	lp->rx_ptr = rx_block;
+}
 
-	/* Set the old command link pointing to this send packet. */
-	outw(lp->tx_cmd_link, ioaddr + WRITE_PTR);
-	outw(tx_block, ioaddr);
-	lp->tx_cmd_link = tx_block + 20;
+/*
+ * Hand a packet to the card for transmission
+ * If we get here, we MUST have already checked
+ * to make sure there is room in the transmit
+ * buffer region.
+ */
 
-	/* Set the next free tx region. */
-	lp->tx_head = tx_block + TX_BUF_SIZE;
-	if (lp->tx_head > TX_BUF_END - TX_BUF_SIZE)
+static void eexp_hw_tx_pio(struct net_device *dev, unsigned short *buf,
+		       unsigned short len)
+{
+	struct net_local *lp = (struct net_local *)dev->priv;
+	unsigned short ioaddr = dev->base_addr;
+
+	if (LOCKUP16 || lp->width) {
+		/* Stop the CU so that there is no chance that it
+		   jumps off to a bogus address while we are writing the
+		   pointer to the next transmit packet in 8-bit mode -- 
+		   this eliminates the "CU wedged" errors in 8-bit mode.
+		   (Zoltan Szilagyi 10-12-96) */ 
+		scb_command(dev, SCB_CUsuspend);
+		outw(0xFFFF, ioaddr+SIGNAL_CA);
+	}
+
+ 	outw(lp->tx_head, ioaddr + WRITE_PTR);
+
+	outw(0x0000, ioaddr + DATAPORT);
+        outw(Cmd_INT|Cmd_Xmit, ioaddr + DATAPORT);
+	outw(lp->tx_head+0x08, ioaddr + DATAPORT);
+	outw(lp->tx_head+0x0e, ioaddr + DATAPORT);
+
+	outw(0x0000, ioaddr + DATAPORT);
+	outw(0x0000, ioaddr + DATAPORT);
+	outw(lp->tx_head+0x08, ioaddr + DATAPORT);
+
+	outw(0x8000|len, ioaddr + DATAPORT);
+	outw(-1, ioaddr + DATAPORT);
+	outw(lp->tx_head+0x16, ioaddr + DATAPORT);
+	outw(0, ioaddr + DATAPORT);
+
+        outsw(ioaddr + DATAPORT, buf, (len+1)>>1);
+
+	outw(lp->tx_tail+0xc, ioaddr + WRITE_PTR);
+	outw(lp->tx_head, ioaddr + DATAPORT);
+
+	dev->trans_start = jiffies;
+	lp->tx_tail = lp->tx_head;
+	if (lp->tx_head==TX_BUF_START+((lp->num_tx_bufs-1)*TX_BUF_SIZE))
 		lp->tx_head = TX_BUF_START;
-
-    if (net_debug > 4) {
-		printk("%s: EExp @%x send length = %d, tx_block %3x, next %3x, "
-			   "reap %4x status %4.4x.\n", dev->name, ioaddr, length,
-			   tx_block, lp->tx_head, lp->tx_reap, inw(ioaddr + SCB_STATUS));
-    }
-
+	else
+		lp->tx_head += TX_BUF_SIZE;
 	if (lp->tx_head != lp->tx_reap)
-		dev->tbusy = 0;
+		netif_wake_queue(dev);
+		
+	if (LOCKUP16 || lp->width) {
+		/* Restart the CU so that the packet can actually
+		   be transmitted. (Zoltan Szilagyi 10-12-96) */
+		scb_command(dev, SCB_CUresume);
+		outw(0xFFFF, ioaddr+SIGNAL_CA);
+	}
+
+	lp->stats.tx_packets++;
+	lp->last_tx = jiffies;
 }
 
-static void
-eexp_rx(struct device *dev)
+/*
+ * Sanity check the suspected EtherExpress card
+ * Read hardware address, reset card, size memory and initialize buffer
+ * memory pointers. These are held in dev->priv, in case someone has more
+ * than one card in a machine.
+ */
+
+static int __init eexp_hw_probe(struct net_device *dev, unsigned short ioaddr)
+{
+	unsigned short hw_addr[3];
+	unsigned char buswidth;
+	unsigned int memory_size;
+	int i;
+	unsigned short xsum = 0;
+	struct net_local *lp;
+
+	printk("%s: EtherExpress 16 at %#x ",dev->name,ioaddr);
+
+	outb(ASIC_RST, ioaddr+EEPROM_Ctrl);
+	outb(0, ioaddr+EEPROM_Ctrl);
+	udelay(500);
+	outb(i586_RST, ioaddr+EEPROM_Ctrl);
+
+	hw_addr[0] = eexp_hw_readeeprom(ioaddr,2);
+	hw_addr[1] = eexp_hw_readeeprom(ioaddr,3);
+	hw_addr[2] = eexp_hw_readeeprom(ioaddr,4);
+
+	/* Standard Address or Compaq LTE Address */
+	if (!((hw_addr[2]==0x00aa && ((hw_addr[1] & 0xff00)==0x0000)) ||
+	      (hw_addr[2]==0x0080 && ((hw_addr[1] & 0xff00)==0x5F00)))) 
+	{
+		printk(" rejected: invalid address %04x%04x%04x\n",
+			hw_addr[2],hw_addr[1],hw_addr[0]);
+		return -ENODEV;
+	}
+
+	/* Calculate the EEPROM checksum.  Carry on anyway if it's bad,
+	 * though.
+	 */
+	for (i = 0; i < 64; i++)
+		xsum += eexp_hw_readeeprom(ioaddr, i);
+	if (xsum != 0xbaba)
+		printk(" (bad EEPROM xsum 0x%02x)", xsum);
+
+	dev->base_addr = ioaddr;
+	for ( i=0 ; i<6 ; i++ )
+		dev->dev_addr[i] = ((unsigned char *)hw_addr)[5-i];
+
+	{
+		static char irqmap[]={0, 9, 3, 4, 5, 10, 11, 0};
+		unsigned short setupval = eexp_hw_readeeprom(ioaddr,0);
+
+		/* Use the IRQ from EEPROM if none was given */
+		if (!dev->irq)
+			dev->irq = irqmap[setupval>>13];
+
+		if (dev->if_port == 0xff) {
+			dev->if_port = !(setupval & 0x1000) ? AUI :
+				eexp_hw_readeeprom(ioaddr,5) & 0x1 ? TPE : BNC;
+		}
+
+		buswidth = !((setupval & 0x400) >> 10);
+	}
+
+	dev->priv = lp = kmalloc(sizeof(struct net_local), GFP_KERNEL);
+	if (!dev->priv)
+		return -ENOMEM;
+
+	memset(dev->priv, 0, sizeof(struct net_local));
+	spin_lock_init(&lp->lock);
+
+ 	printk("(IRQ %d, %s connector, %d-bit bus", dev->irq, 
+ 	       eexp_ifmap[dev->if_port], buswidth?8:16);
+ 
+ 	eexp_hw_set_interface(dev);
+  
+	/* Find out how much RAM we have on the card */
+	outw(0, dev->base_addr + WRITE_PTR);
+	for (i = 0; i < 32768; i++)
+		outw(0, dev->base_addr + DATAPORT);
+
+        for (memory_size = 0; memory_size < 64; memory_size++)
+	{
+		outw(memory_size<<10, dev->base_addr + READ_PTR);
+		if (inw(dev->base_addr+DATAPORT))
+			break;
+		outw(memory_size<<10, dev->base_addr + WRITE_PTR);
+		outw(memory_size | 0x5000, dev->base_addr+DATAPORT);
+		outw(memory_size<<10, dev->base_addr + READ_PTR);
+		if (inw(dev->base_addr+DATAPORT) != (memory_size | 0x5000))
+			break;
+	}
+
+	/* Sort out the number of buffers.  We may have 16, 32, 48 or 64k
+	 * of RAM to play with.
+	 */
+	lp->num_tx_bufs = 4;
+	lp->rx_buf_end = 0x3ff6;
+	switch (memory_size)
+	{
+	case 64:
+		lp->rx_buf_end += 0x4000;
+	case 48:
+		lp->num_tx_bufs += 4;
+		lp->rx_buf_end += 0x4000;
+	case 32:
+		lp->rx_buf_end += 0x4000;
+	case 16:
+		printk(", %dk RAM)\n", memory_size);
+		break;
+	default:
+		printk(") bad memory size (%dk).\n", memory_size);
+		kfree(dev->priv);
+		return -ENODEV;
+		break;
+	}
+
+	lp->rx_buf_start = TX_BUF_START + (lp->num_tx_bufs*TX_BUF_SIZE);
+	lp->width = buswidth;
+
+	dev->open = eexp_open;
+	dev->stop = eexp_close;
+	dev->hard_start_xmit = eexp_xmit;
+	dev->get_stats = eexp_stats;
+	dev->set_multicast_list = &eexp_set_multicast;
+	dev->tx_timeout = eexp_timeout;
+	dev->watchdog_timeo = 2*HZ;
+	ether_setup(dev);
+	return 0;
+}
+
+/*
+ * Read a word from the EtherExpress on-board serial EEPROM.
+ * The EEPROM contains 64 words of 16 bits.
+ */
+static unsigned short __init eexp_hw_readeeprom(unsigned short ioaddr,
+						    unsigned char location)
+{
+	unsigned short cmd = 0x180|(location&0x7f);
+	unsigned short rval = 0,wval = EC_CS|i586_RST;
+	int i;
+
+	outb(EC_CS|i586_RST,ioaddr+EEPROM_Ctrl);
+	for (i=0x100 ; i ; i>>=1 )
+	{
+		if (cmd&i)
+			wval |= EC_Wr;
+		else
+			wval &= ~EC_Wr;
+
+		outb(wval,ioaddr+EEPROM_Ctrl);
+		outb(wval|EC_Clk,ioaddr+EEPROM_Ctrl);
+		eeprom_delay();
+		outb(wval,ioaddr+EEPROM_Ctrl);
+		eeprom_delay();
+	}
+	wval &= ~EC_Wr;
+	outb(wval,ioaddr+EEPROM_Ctrl);
+	for (i=0x8000 ; i ; i>>=1 )
+	{
+		outb(wval|EC_Clk,ioaddr+EEPROM_Ctrl);
+		eeprom_delay();
+		if (inb(ioaddr+EEPROM_Ctrl)&EC_Rd)
+			rval |= i;
+		outb(wval,ioaddr+EEPROM_Ctrl);
+		eeprom_delay();
+	}
+	wval &= ~EC_CS;
+	outb(wval|EC_Clk,ioaddr+EEPROM_Ctrl);
+	eeprom_delay();
+	outb(wval,ioaddr+EEPROM_Ctrl);
+	eeprom_delay();
+	return rval;
+}
+
+/*
+ * Reap tx buffers and return last transmit status.
+ * if ==0 then either:
+ *    a) we're not transmitting anything, so why are we here?
+ *    b) we've died.
+ * otherwise, Stat_Busy(return) means we've still got some packets
+ * to transmit, Stat_Done(return) means our buffers should be empty
+ * again
+ */
+
+static unsigned short eexp_hw_lasttxstat(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
-	short ioaddr = dev->base_addr;
-	short saved_write_ptr = inw(ioaddr + WRITE_PTR);
-	short rx_head = lp->rx_head;
-	short rx_tail = lp->rx_tail;
-	short boguscount = 10;
-	short frame_status;
+	unsigned short tx_block = lp->tx_reap;
+	unsigned short status;
 
-	/* Set the read pointer to the Rx frame. */
-	outw(rx_head, ioaddr + READ_PTR);
-	while ((frame_status = inw(ioaddr)) < 0) {		/* Command complete */
-		short rfd_cmd = inw(ioaddr);
-		short next_rx_frame = inw(ioaddr);
-		short data_buffer_addr = inw(ioaddr);
-		short pkt_len;
-		
-		/* Set the read pointer the data buffer. */
-		outw(data_buffer_addr, ioaddr + READ_PTR);
-		pkt_len = inw(ioaddr);
+	if (!netif_queue_stopped(dev) && lp->tx_head==lp->tx_reap)
+		return 0x0000;
 
-		if (rfd_cmd != 0  ||  data_buffer_addr != rx_head + 22
-			||  pkt_len & 0xC000 != 0xC000) {
-			printk("%s: Rx frame at %#x corrupted, status %04x cmd %04x"
-				   "next %04x data-buf @%04x %04x.\n", dev->name, rx_head,
-				   frame_status, rfd_cmd, next_rx_frame, data_buffer_addr,
-				   pkt_len);
-		} else if ((frame_status & 0x2000) == 0) {
-			/* Frame Rxed, but with error. */
-			lp->stats.rx_errors++;
-			if (frame_status & 0x0800) lp->stats.rx_crc_errors++;
-			if (frame_status & 0x0400) lp->stats.rx_frame_errors++;
-			if (frame_status & 0x0200) lp->stats.rx_fifo_errors++;
-			if (frame_status & 0x0100) lp->stats.rx_over_errors++;
-			if (frame_status & 0x0080) lp->stats.rx_length_errors++;
-		} else {
-			/* Malloc up new buffer. */
-			int sksize;
-			struct sk_buff *skb;
-
-			pkt_len &= 0x3fff;
-			sksize = sizeof(struct sk_buff) + pkt_len;
-			skb = alloc_skb(sksize, GFP_ATOMIC);
-			if (skb == NULL) {
-				printk("%s: Memory squeeze, dropping packet.\n", dev->name);
-				lp->stats.rx_dropped++;
-				break;
+	do
+	{
+		outw(tx_block & ~31, dev->base_addr + SM_PTR);
+		status = inw(dev->base_addr + SHADOW(tx_block));
+		if (!Stat_Done(status))
+		{
+			lp->tx_link = tx_block;
+			return status;
+		}
+		else
+		{
+			lp->last_tx_restart = 0;
+			lp->stats.collisions += Stat_NoColl(status);
+			if (!Stat_OK(status))
+			{
+				char *whatsup = NULL;
+				lp->stats.tx_errors++;
+  				if (Stat_Abort(status)) 
+  					lp->stats.tx_aborted_errors++;
+				if (Stat_TNoCar(status)) {
+					whatsup = "aborted, no carrier";
+					lp->stats.tx_carrier_errors++;
+				}
+				if (Stat_TNoCTS(status)) {
+					whatsup = "aborted, lost CTS";
+  					lp->stats.tx_carrier_errors++;
+				}
+				if (Stat_TNoDMA(status)) {
+					whatsup = "FIFO underran";
+  					lp->stats.tx_fifo_errors++;
+				}
+				if (Stat_TXColl(status)) {
+					whatsup = "aborted, too many collisions";
+					lp->stats.tx_aborted_errors++;
+				}
+				if (whatsup)
+					printk(KERN_INFO "%s: transmit %s\n",
+					       dev->name, whatsup);
 			}
-			skb->mem_len = sksize;
-			skb->mem_addr = skb;
-			skb->len = pkt_len;
-			skb->dev = dev;
+			else
+				lp->stats.tx_packets++;
+		}
+		if (tx_block == TX_BUF_START+((lp->num_tx_bufs-1)*TX_BUF_SIZE))
+			lp->tx_reap = tx_block = TX_BUF_START;
+		else
+			lp->tx_reap = tx_block += TX_BUF_SIZE;
+		netif_wake_queue(dev);
+	}
+	while (lp->tx_reap != lp->tx_head);
 
-			outw(data_buffer_addr + 10, ioaddr + READ_PTR);
+	lp->tx_link = lp->tx_tail + 0x08;
 
-			insw(ioaddr, skb->data, (pkt_len + 1) >> 1);
-		
-#ifdef HAVE_NETIF_RX
-			netif_rx(skb);
-#else
-			skb->lock = 0;
-			if (dev_rint((unsigned char*)skb, pkt_len, IN_SKBUFF, dev) != 0) {
-				kfree_s(skb, sksize);
-				lp->stats.rx_dropped++;
-				break;
+	return status;
+}
+
+/*
+ * This should never happen. It is called when some higher routine detects
+ * that the CU has stopped, to try to restart it from the last packet we knew
+ * we were working on, or the idle loop if we had finished for the time.
+ */
+
+static void eexp_hw_txrestart(struct net_device *dev)
+{
+	struct net_local *lp = (struct net_local *)dev->priv;
+	unsigned short ioaddr = dev->base_addr;
+
+	lp->last_tx_restart = lp->tx_link;
+	scb_wrcbl(dev, lp->tx_link);
+	scb_command(dev, SCB_CUstart);
+	outb(0,ioaddr+SIGNAL_CA);
+
+	{
+		unsigned short boguscount=50,failcount=5;
+		while (!scb_status(dev))
+		{
+			if (!--boguscount)
+			{
+				if (--failcount)
+				{
+					printk(KERN_WARNING "%s: CU start timed out, status %04x, cmd %04x\n", dev->name, scb_status(dev), scb_rdcmd(dev));
+				        scb_wrcbl(dev, lp->tx_link);
+					scb_command(dev, SCB_CUstart);
+					outb(0,ioaddr+SIGNAL_CA);
+					boguscount = 100;
+				}
+				else
+				{
+					printk(KERN_WARNING "%s: Failed to restart CU, resetting board...\n",dev->name);
+					eexp_hw_init586(dev);
+					netif_wake_queue(dev);
+					return;
+				}
 			}
-#endif
-			lp->stats.rx_packets++;
 		}
+	}
+}
 
-		/* Clear the status word and set End-of-List on the rx frame. */
-		outw(rx_head, ioaddr + WRITE_PTR);
-		outw(0x0000, ioaddr);
-		outw(0xC000, ioaddr);
-#ifndef final_version
-		if (next_rx_frame != rx_head + RX_BUF_SIZE
-			&& next_rx_frame != RX_BUF_START) {
-			printk("%s: Rx next frame at %#x is %#x instead of %#x.\n", dev->name,
-				   rx_head, next_rx_frame, rx_head + RX_BUF_SIZE);
-			next_rx_frame = rx_head + RX_BUF_SIZE;
-			if (next_rx_frame >= RX_BUF_END - RX_BUF_SIZE)
-				next_rx_frame = RX_BUF_START;
-		}
+/*
+ * Writes down the list of transmit buffers into card memory.  Each
+ * entry consists of an 82586 transmit command, followed by a jump
+ * pointing to itself.  When we want to transmit a packet, we write
+ * the data into the appropriate transmit buffer and then modify the
+ * preceding jump to point at the new transmit command.  This means that
+ * the 586 command unit is continuously active.
+ */
+
+static void eexp_hw_txinit(struct net_device *dev)
+{
+	struct net_local *lp = (struct net_local *)dev->priv;
+	unsigned short tx_block = TX_BUF_START;
+	unsigned short curtbuf;
+	unsigned short ioaddr = dev->base_addr;
+
+	for ( curtbuf=0 ; curtbuf<lp->num_tx_bufs ; curtbuf++ )
+	{
+		outw(tx_block, ioaddr + WRITE_PTR);
+
+	        outw(0x0000, ioaddr + DATAPORT);
+		outw(Cmd_INT|Cmd_Xmit, ioaddr + DATAPORT);
+		outw(tx_block+0x08, ioaddr + DATAPORT);
+		outw(tx_block+0x0e, ioaddr + DATAPORT);
+
+		outw(0x0000, ioaddr + DATAPORT);
+		outw(0x0000, ioaddr + DATAPORT);
+		outw(tx_block+0x08, ioaddr + DATAPORT);
+
+		outw(0x8000, ioaddr + DATAPORT);
+		outw(-1, ioaddr + DATAPORT);
+		outw(tx_block+0x16, ioaddr + DATAPORT);
+		outw(0x0000, ioaddr + DATAPORT);
+
+		tx_block += TX_BUF_SIZE;
+	}
+	lp->tx_head = TX_BUF_START;
+	lp->tx_reap = TX_BUF_START;
+	lp->tx_tail = tx_block - TX_BUF_SIZE;
+	lp->tx_link = lp->tx_tail + 0x08;
+	lp->rx_buf_start = tx_block;
+
+}
+
+/*
+ * Write the circular list of receive buffer descriptors to card memory.
+ * The end of the list isn't marked, which means that the 82586 receive
+ * unit will loop until buffers become available (this avoids it giving us
+ * "out of resources" messages).
+ */
+
+static void eexp_hw_rxinit(struct net_device *dev)
+{
+	struct net_local *lp = (struct net_local *)dev->priv;
+	unsigned short rx_block = lp->rx_buf_start;
+	unsigned short ioaddr = dev->base_addr;
+
+	lp->num_rx_bufs = 0;
+	lp->rx_first = lp->rx_ptr = rx_block;
+	do
+	{
+		lp->num_rx_bufs++;
+
+		outw(rx_block, ioaddr + WRITE_PTR);
+
+		outw(0, ioaddr + DATAPORT);  outw(0, ioaddr+DATAPORT);
+		outw(rx_block + RX_BUF_SIZE, ioaddr+DATAPORT);
+		outw(0xffff, ioaddr+DATAPORT);
+
+		outw(0x0000, ioaddr+DATAPORT);
+		outw(0xdead, ioaddr+DATAPORT);
+		outw(0xdead, ioaddr+DATAPORT);
+		outw(0xdead, ioaddr+DATAPORT);
+		outw(0xdead, ioaddr+DATAPORT);
+		outw(0xdead, ioaddr+DATAPORT);
+		outw(0xdead, ioaddr+DATAPORT);
+
+		outw(0x0000, ioaddr+DATAPORT);
+		outw(rx_block + RX_BUF_SIZE + 0x16, ioaddr+DATAPORT);
+		outw(rx_block + 0x20, ioaddr+DATAPORT);
+		outw(0, ioaddr+DATAPORT);
+		outw(RX_BUF_SIZE-0x20, ioaddr+DATAPORT);
+
+		lp->rx_last = rx_block;
+		rx_block += RX_BUF_SIZE;
+	} while (rx_block <= lp->rx_buf_end-RX_BUF_SIZE);
+
+
+	/* Make first Rx frame descriptor point to first Rx buffer
+           descriptor */
+	outw(lp->rx_first + 6, ioaddr+WRITE_PTR);
+	outw(lp->rx_first + 0x16, ioaddr+DATAPORT);
+
+	/* Close Rx frame descriptor ring */
+  	outw(lp->rx_last + 4, ioaddr+WRITE_PTR);
+  	outw(lp->rx_first, ioaddr+DATAPORT);
+  
+	/* Close Rx buffer descriptor ring */
+	outw(lp->rx_last + 0x16 + 2, ioaddr+WRITE_PTR);
+	outw(lp->rx_first + 0x16, ioaddr+DATAPORT);
+	
+}
+
+/*
+ * Un-reset the 586, and start the configuration sequence. We don't wait for
+ * this to finish, but allow the interrupt handler to start the CU and RU for
+ * us.  We can't start the receive/transmission system up before we know that
+ * the hardware is configured correctly.
+ */
+
+static void eexp_hw_init586(struct net_device *dev)
+{
+	struct net_local *lp = (struct net_local *)dev->priv;
+	unsigned short ioaddr = dev->base_addr;
+	int i;
+
+#if NET_DEBUG > 6
+	printk("%s: eexp_hw_init586()\n", dev->name);
 #endif
-		outw(rx_tail+2, ioaddr + WRITE_PTR);
-		outw(0x0000, ioaddr);	/* Clear the end-of-list on the prev. RFD. */
 
-#ifndef final_version
-		outw(rx_tail+4, ioaddr + READ_PTR);
-		if (inw(ioaddr) != rx_head) {
-			printk("%s: Rx buf link mismatch, at %04x link %04x instead of %04x.\n",
-				   dev->name, rx_tail, (outw(rx_tail+4, ioaddr + READ_PTR),inw(ioaddr)),
-				   rx_head);
-			outw(rx_head, ioaddr);
-		}
+	lp->started = 0;
+
+	set_loopback(dev);
+
+	outb(SIRQ_dis|irqrmap[dev->irq],ioaddr+SET_IRQ);
+
+	/* Download the startup code */
+	outw(lp->rx_buf_end & ~31, ioaddr + SM_PTR);
+	outw(lp->width?0x0001:0x0000, ioaddr + 0x8006);
+	outw(0x0000, ioaddr + 0x8008);
+	outw(0x0000, ioaddr + 0x800a);
+	outw(0x0000, ioaddr + 0x800c);
+	outw(0x0000, ioaddr + 0x800e);
+
+	for (i = 0; i < (sizeof(start_code)); i+=32) {
+		int j;
+		outw(i, ioaddr + SM_PTR);
+		for (j = 0; j < 16; j+=2)
+			outw(start_code[(i+j)/2],
+			     ioaddr+0x4000+j);
+		for (j = 0; j < 16; j+=2)
+			outw(start_code[(i+j+16)/2],
+			     ioaddr+0x8000+j);
+	}
+
+	/* Do we want promiscuous mode or multicast? */
+	outw(CONF_PROMISC & ~31, ioaddr+SM_PTR);
+	i = inw(ioaddr+SHADOW(CONF_PROMISC));
+	outw((dev->flags & IFF_PROMISC)?(i|1):(i & ~1), 
+	     ioaddr+SHADOW(CONF_PROMISC));
+	lp->was_promisc = dev->flags & IFF_PROMISC;
+#if 0
+	eexp_setup_filter(dev);
 #endif
 
-		rx_tail = rx_head;
-		rx_head = next_rx_frame;
-		if (--boguscount == 0)
-			break;
-		outw(rx_head, ioaddr + READ_PTR);
+	/* Write our hardware address */
+	outw(CONF_HWADDR & ~31, ioaddr+SM_PTR);
+	outw(((unsigned short *)dev->dev_addr)[0], ioaddr+SHADOW(CONF_HWADDR));
+	outw(((unsigned short *)dev->dev_addr)[1], 
+	     ioaddr+SHADOW(CONF_HWADDR+2));
+	outw(((unsigned short *)dev->dev_addr)[2],
+	     ioaddr+SHADOW(CONF_HWADDR+4));
+
+	eexp_hw_txinit(dev);
+	eexp_hw_rxinit(dev);
+
+	outb(0,ioaddr+EEPROM_Ctrl);
+	mdelay(5);
+
+	scb_command(dev, 0xf000);
+	outb(0,ioaddr+SIGNAL_CA);
+
+	outw(0, ioaddr+SM_PTR);
+
+	{
+		unsigned short rboguscount=50,rfailcount=5;
+		while (inw(ioaddr+0x4000))
+		{
+			if (!--rboguscount)
+			{
+				printk(KERN_WARNING "%s: i82586 reset timed out, kicking...\n",
+					dev->name);
+				scb_command(dev, 0);
+				outb(0,ioaddr+SIGNAL_CA);
+				rboguscount = 100;
+				if (!--rfailcount)
+				{
+					printk(KERN_WARNING "%s: i82586 not responding, giving up.\n",
+						dev->name);
+					return;
+				}
+			}
+		}
+	}
+
+        scb_wrcbl(dev, CONF_LINK);
+	scb_command(dev, 0xf000|SCB_CUstart);
+	outb(0,ioaddr+SIGNAL_CA);
+
+	{
+		unsigned short iboguscount=50,ifailcount=5;
+		while (!scb_status(dev))
+		{
+			if (!--iboguscount)
+			{
+				if (--ifailcount)
+				{
+					printk(KERN_WARNING "%s: i82586 initialization timed out, status %04x, cmd %04x\n",
+						dev->name, scb_status(dev), scb_rdcmd(dev));
+					scb_wrcbl(dev, CONF_LINK);
+				        scb_command(dev, 0xf000|SCB_CUstart);
+					outb(0,ioaddr+SIGNAL_CA);
+					iboguscount = 100;
+				}
+				else
+				{
+					printk(KERN_WARNING "%s: Failed to initialize i82586, giving up.\n",dev->name);
+					return;
+				}
+			}
+		}
+	}
+
+	clear_loopback(dev);
+	outb(SIRQ_en|irqrmap[dev->irq],ioaddr+SET_IRQ);
+
+	lp->init_time = jiffies;
+#if NET_DEBUG > 6
+        printk("%s: leaving eexp_hw_init586()\n", dev->name);
+#endif
+	return;
+}
+
+static void eexp_setup_filter(struct net_device *dev)
+{
+	struct dev_mc_list *dmi = dev->mc_list;
+	unsigned short ioaddr = dev->base_addr;
+	int count = dev->mc_count;
+	int i;
+	if (count > 8) {
+		printk(KERN_INFO "%s: too many multicast addresses (%d)\n",
+		       dev->name, count);
+		count = 8;
 	}
 	
-	lp->rx_head = rx_head;
-	lp->rx_tail = rx_tail;
-	
-	/* Restore the original write pointer. */
-	outw(saved_write_ptr, ioaddr + WRITE_PTR);
+	outw(CONF_NR_MULTICAST & ~31, ioaddr+SM_PTR);
+	outw(count, ioaddr+SHADOW(CONF_NR_MULTICAST));
+	for (i = 0; i < count; i++) {
+		unsigned short *data = (unsigned short *)dmi->dmi_addr;
+		if (!dmi) {
+			printk(KERN_INFO "%s: too few multicast addresses\n", dev->name);
+			break;
+		}
+		if (dmi->dmi_addrlen != ETH_ALEN) {
+			printk(KERN_INFO "%s: invalid multicast address length given.\n", dev->name);
+			continue;
+		}
+		outw((CONF_MULTICAST+(6*i)) & ~31, ioaddr+SM_PTR);
+		outw(data[0], ioaddr+SHADOW(CONF_MULTICAST+(6*i)));
+		outw((CONF_MULTICAST+(6*i)+2) & ~31, ioaddr+SM_PTR);
+		outw(data[1], ioaddr+SHADOW(CONF_MULTICAST+(6*i)+2));
+		outw((CONF_MULTICAST+(6*i)+4) & ~31, ioaddr+SM_PTR);
+		outw(data[2], ioaddr+SHADOW(CONF_MULTICAST+(6*i)+4));
+	}
 }
-
+
 /*
- * Local variables:
- *  compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/net/inet -I/usr/src/linux/drivers/net -Wall -Wstrict-prototypes -O6 -m486 -c eexpress.c"
- *  version-control: t
- *  kept-new-versions: 5
- *  tab-width: 4
+ * Set or clear the multicast filter for this adaptor.
+ */
+static void
+eexp_set_multicast(struct net_device *dev)
+{
+        unsigned short ioaddr = dev->base_addr;
+        struct net_local *lp = (struct net_local *)dev->priv;
+        int kick = 0, i;
+        if ((dev->flags & IFF_PROMISC) != lp->was_promisc) {
+                outw(CONF_PROMISC & ~31, ioaddr+SM_PTR);
+                i = inw(ioaddr+SHADOW(CONF_PROMISC));
+                outw((dev->flags & IFF_PROMISC)?(i|1):(i & ~1),
+                     ioaddr+SHADOW(CONF_PROMISC));
+                lp->was_promisc = dev->flags & IFF_PROMISC;
+                kick = 1;
+        }
+        if (!(dev->flags & IFF_PROMISC)) {
+                eexp_setup_filter(dev);
+                if (lp->old_mc_count != dev->mc_count) {
+                        kick = 1;
+                        lp->old_mc_count = dev->mc_count;
+                }
+        }
+        if (kick) {
+                unsigned long oj;
+                scb_command(dev, SCB_CUsuspend);
+                outb(0, ioaddr+SIGNAL_CA);
+                outb(0, ioaddr+SIGNAL_CA);
+#if 0
+                printk("%s: waiting for CU to go suspended\n", dev->name);
+#endif
+                oj = jiffies;
+                while ((SCB_CUstat(scb_status(dev)) == 2) &&
+                       ((jiffies-oj) < 2000));
+		if (SCB_CUstat(scb_status(dev)) == 2)
+			printk("%s: warning, CU didn't stop\n", dev->name);
+                lp->started &= ~(STARTED_CU);
+                scb_wrcbl(dev, CONF_LINK);
+                scb_command(dev, SCB_CUstart);
+                outb(0, ioaddr+SIGNAL_CA);
+        }
+}
+
+
+/*
+ * MODULE stuff
+ */
+
+#ifdef MODULE
+
+#define EEXP_MAX_CARDS     4    /* max number of cards to support */
+
+static struct net_device dev_eexp[EEXP_MAX_CARDS];
+static int irq[EEXP_MAX_CARDS];
+static int io[EEXP_MAX_CARDS];
+
+MODULE_PARM(io, "1-" __MODULE_STRING(EEXP_MAX_CARDS) "i");
+MODULE_PARM(irq, "1-" __MODULE_STRING(EEXP_MAX_CARDS) "i");
+
+/* Ideally the user would give us io=, irq= for every card.  If any parameters
+ * are specified, we verify and then use them.  If no parameters are given, we
+ * autoprobe for one card only.
+ */
+int init_module(void)
+{
+	int this_dev, found = 0;
+
+	for (this_dev = 0; this_dev < EEXP_MAX_CARDS; this_dev++) {
+		struct net_device *dev = &dev_eexp[this_dev];
+		dev->irq = irq[this_dev];
+		dev->base_addr = io[this_dev];
+		dev->init = express_probe;
+		if (io[this_dev] == 0) {
+			if (this_dev) break;
+			printk(KERN_NOTICE "eexpress.c: Module autoprobe not recommended, give io=xx.\n");
+		}
+		if (register_netdev(dev) != 0) {
+			printk(KERN_WARNING "eexpress.c: Failed to register card at 0x%x.\n", io[this_dev]);
+			if (found != 0) return 0;
+			return -ENXIO;
+		}
+		found++;
+	}
+	return 0;
+}
+
+void cleanup_module(void)
+{
+	int this_dev;
+
+	for (this_dev = 0; this_dev < EEXP_MAX_CARDS; this_dev++) {
+		struct net_device *dev = &dev_eexp[this_dev];
+		if (dev->priv != NULL) {
+			unregister_netdev(dev);
+			kfree(dev->priv);
+			dev->priv = NULL;
+			release_region(dev->base_addr, EEXP_IO_EXTENT);
+		}
+	}
+}
+#endif
+
+/*
+ * Local Variables:
+ *  c-file-style: "linux"
+ *  tab-width: 8
  * End:
  */

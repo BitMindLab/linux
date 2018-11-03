@@ -11,28 +11,29 @@
  */
 
 #include <linux/types.h>
+#include <linux/kdev_t.h>
 
 /* Eisa Enhanced mode operation - slot locating and addressing */
 #define MINEISA 1   /* I don't have an EISA Spec to know these ranges, so I */
 #define MAXEISA 8   /* Just took my machine's specifications.  Adjust to fit.*/
 		    /* I just saw an ad, and bumped this from 6 to 8 */
-#define	SLOTBASE(x)	((x << 12)+ 0xc80 )
-#define	BASE		(base)
+#define	SLOTBASE(x)	((x << 12) + 0xc80)
+#define SLOTSIZE	0x5c
 
 /* EISA configuration registers & values */
-#define	HID0	(base + 0x0)
-#define	HID1	(base + 0x1)
-#define HID2	(base + 0x2)
-#define	HID3	(base + 0x3)
-#define	EBCNTRL	(base + 0x4)
-#define	PORTADR	(base + 0x40)
-#define BIOSADR (base + 0x41)
-#define INTDEF	(base + 0x42)
-#define SCSIDEF (base + 0x43)
-#define BUSDEF	(base + 0x44)
-#define	RESV0	(base + 0x45)
-#define RESV1	(base + 0x46)
-#define	RESV2	(base + 0x47)
+#define	HID0(base)	(base + 0x0)
+#define	HID1(base)	(base + 0x1)
+#define HID2(base)	(base + 0x2)
+#define	HID3(base)	(base + 0x3)
+#define	EBCNTRL(base)	(base + 0x4)
+#define	PORTADR(base)	(base + 0x40)
+#define BIOSADR(base)	(base + 0x41)
+#define INTDEF(base)	(base + 0x42)
+#define SCSIDEF(base)	(base + 0x43)
+#define BUSDEF(base)	(base + 0x44)
+#define	RESV0(base)	(base + 0x45)
+#define RESV1(base)	(base + 0x46)
+#define	RESV2(base)	(base + 0x47)
 
 #define	HID_MFG	"ADP"
 #define	HID_PRD 0
@@ -40,13 +41,13 @@
 #define EBCNTRL_VALUE 1
 #define PORTADDR_ENH 0x80
 /* READ */
-#define	G2INTST	(BASE + 0x56)
-#define G2STAT	(BASE + 0x57)
-#define	MBOXIN0	(BASE + 0x58)
-#define	MBOXIN1	(BASE + 0x59)
-#define	MBOXIN2	(BASE + 0x5a)
-#define	MBOXIN3	(BASE + 0x5b)
-#define G2STAT2	(BASE + 0x5c)
+#define	G2INTST(base)	(base + 0x56)
+#define G2STAT(base)	(base + 0x57)
+#define	MBOXIN0(base)	(base + 0x58)
+#define	MBOXIN1(base)	(base + 0x59)
+#define	MBOXIN2(base)	(base + 0x5a)
+#define	MBOXIN3(base)	(base + 0x5b)
+#define G2STAT2(base)	(base + 0x5c)
 
 #define G2INTST_MASK		0xf0	/* isolate the status */
 #define	G2INTST_CCBGOOD		0x10	/* CCB Completed */
@@ -64,12 +65,12 @@
 #define G2STAT2_READY	0	/* Host Ready Bit */
 
 /* WRITE (and ReadBack) */
-#define	MBOXOUT0	(BASE + 0x50)
-#define	MBOXOUT1	(BASE + 0x51)
-#define	MBOXOUT2	(BASE + 0x52)
-#define	MBOXOUT3	(BASE + 0x53)
-#define	ATTN		(BASE + 0x54)
-#define G2CNTRL		(BASE + 0x55)
+#define	MBOXOUT0(base)	(base + 0x50)
+#define	MBOXOUT1(base)	(base + 0x51)
+#define	MBOXOUT2(base)	(base + 0x52)
+#define	MBOXOUT3(base)	(base + 0x53)
+#define	ATTN(base)	(base + 0x54)
+#define G2CNTRL(base)	(base + 0x55)
 
 #define	ATTN_IMMED	0x10	/* Immediate Command */
 #define	ATTN_START	0x40	/* Start CCB */
@@ -81,8 +82,8 @@
 
 /* This is used with scatter-gather */
 struct aha1740_chain {
-  ulong  dataptr;		/* Location of data */
-  ulong  datalen;		/* Size of this part of chain */
+  u32  dataptr;		/* Location of data */
+  u32  datalen;		/* Size of this part of chain */
 };
 
 /* These belong in scsi.h */
@@ -107,16 +108,16 @@ struct aha1740_chain {
 #define MAX_STATUS 32
 
 struct ecb {			/* Enhanced Control Block 6.1 */
-  ushort cmdw;			/* Command Word */
-  			/* Flag Word 1 */
-  ushort	cne:1,		/* Control Block Chaining */
+  u16	cmdw;			/* Command Word */
+  /* Flag Word 1 */
+  u16		cne:1,		/* Control Block Chaining */
 	:6,	di:1,		/* Disable Interrupt */
 	:2,	ses:1,		/* Suppress Underrun error */
 	:1,	sg:1,		/* Scatter/Gather */
 	:1,	dsb:1,		/* Disable Status Block */
 		ars:1;		/* Automatic Request Sense */
-  			/* Flag Word 2 */
-  ushort	lun:3,		/* Logical Unit */
+  /* Flag Word 2 */
+  u16		lun:3,		/* Logical Unit */
 		tag:1,		/* Tagged Queuing */
 		tt:2,		/* Tag Type */
 		nd:1,		/* No Disconnect */
@@ -125,20 +126,20 @@ struct ecb {			/* Enhanced Control Block 6.1 */
 		st:1,		/* Suppress Transfer */
 		chk:1,		/* Calculate Checksum */
 	:2,	rec:1,	:1;	/* Error Recovery */
-  ushort nil0;			/* nothing */
-  ulong  dataptr;		/* Data or Scatter List ptr */
-  ulong	 datalen;		/* Data or Scatter List len */
-  ulong  statusptr;		/* Status Block ptr */
-  ulong  linkptr;		/* Chain Address */
-  ulong  nil1;			/* nothing */
-  ulong  senseptr;		/* Sense Info Pointer */
-  unchar senselen;		/* Sense Length */
-  unchar cdblen;		/* CDB Length */
-  ushort datacheck;		/* Data checksum */
-  unchar cdb[MAX_CDB];		/* CDB area */
-  /* Hardware defined portion ends here, rest is driver defined */
-  unchar sense[MAX_SENSE];	/* Sense area */ 
-  unchar status[MAX_STATUS];	/* Status area */
+  u16	nil0;			/* nothing */
+  u32	dataptr;		/* Data or Scatter List ptr */
+  u32	datalen;		/* Data or Scatter List len */
+  u32	statusptr;		/* Status Block ptr */
+  u32	linkptr;		/* Chain Address */
+  u32	nil1;			/* nothing */
+  u32	senseptr;		/* Sense Info Pointer */
+  u8	senselen;		/* Sense Length */
+  u8	cdblen;			/* CDB Length */
+  u16	datacheck;		/* Data checksum */
+  u8	cdb[MAX_CDB];		/* CDB area */
+/* Hardware defined portion ends here, rest is driver defined */
+  u8	sense[MAX_SENSE];	/* Sense area */ 
+  u8	status[MAX_STATUS];	/* Status area */
   Scsi_Cmnd *SCpnt;		/* Link to the SCSI Command Block */
   void (*done)(Scsi_Cmnd *);	/* Completion Function */
 };
@@ -152,29 +153,36 @@ struct ecb {			/* Enhanced Control Block 6.1 */
 #define AHA1740CMD_RINQ  0x0a	/* Read Host Adapter Inquiry Data */
 #define AHA1740CMD_TARG  0x10	/* Target SCSI Command */
 
-int aha1740_detect(int);
+int aha1740_detect(Scsi_Host_Template *);
 int aha1740_command(Scsi_Cmnd *);
 int aha1740_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-int aha1740_abort(Scsi_Cmnd *, int);
-const char *aha1740_info(void);
-int aha1740_reset(Scsi_Cmnd *);
-int aha1740_biosparam(int, int, int*);
+int aha1740_abort(Scsi_Cmnd *);
+int aha1740_reset(Scsi_Cmnd *, unsigned int);
+int aha1740_biosparam(Disk *, kdev_t, int*);
+int aha1740_proc_info(char *buffer, char **start, off_t offset,
+                               int length, int hostno, int inout);
 
 #define AHA1740_ECBS 32
 #define AHA1740_SCATTER 16
+#define AHA1740_CMDLUN 1
 
 #ifndef NULL
-#define NULL 0
+	#define NULL 0
 #endif
 
-#define AHA1740 {"Adaptec 1740", aha1740_detect,	\
-		aha1740_info, aha1740_command,		\
-		aha1740_queuecommand,			\
-		aha1740_abort,				\
-		aha1740_reset,				\
-	        NULL,		                        \
-		aha1740_biosparam,                      \
-		AHA1740_ECBS, 7, AHA1740_SCATTER, 1, 0, 0}
+#define AHA1740 {  proc_name:      "aha1740",				\
+		   proc_info:      aha1740_proc_info,	                \
+		   name:           "Adaptec 174x (EISA)",		\
+		   detect:         aha1740_detect,			\
+		   command:        aha1740_command,			\
+		   queuecommand:   aha1740_queuecommand,		\
+		   abort:          aha1740_abort,			\
+		   reset:          aha1740_reset,			\
+		   bios_param:     aha1740_biosparam,                   \
+		   can_queue:      AHA1740_ECBS, 			\
+		   this_id:        7, 					\
+		   sg_tablesize:   AHA1740_SCATTER, 			\
+		   cmd_per_lun:    AHA1740_CMDLUN, 			\
+		   use_clustering: ENABLE_CLUSTERING}
 
 #endif
-

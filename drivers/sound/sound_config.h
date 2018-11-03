@@ -1,213 +1,100 @@
 /* sound_config.h
  *
- * A driver for Soundcards, misc configuration parameters.
+ * A driver for sound cards, misc. configuration parameters.
+ */
+/*
+ * Copyright (C) by Hannu Savolainen 1993-1997
  *
- * 
- * Copyright by Hannu Savolainen 1993
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
+ * OSS/Free for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
+ * Version 2 (June 1991). See the "COPYING" file distributed with this software
+ * for more info.
  */
 
-#include "local.h"
 
+#ifndef  _SOUND_CONFIG_H_
+#define  _SOUND_CONFIG_H_
 
-#undef CONFIGURE_SOUNDCARD
-#undef DYNAMIC_BUFFER
+#include <linux/config.h>
+#include <linux/fs.h>
+#include <linux/sound.h>
 
-#ifdef KERNEL_SOUNDCARD
-#define CONFIGURE_SOUNDCARD
-#define DYNAMIC_BUFFER
-#undef LOADABLE_SOUNDCARD
-#endif
+#include "os.h"
+#include "soundvers.h"
 
-#ifdef EXCLUDE_SEQUENCER
-#define EXCLUDE_MIDI
-#define EXCLUDE_YM3812
-#define EXCLUDE_OPL3
-#endif
 
 #ifndef SND_DEFAULT_ENABLE
 #define SND_DEFAULT_ENABLE	1
-#endif
-
-/** UWM - new MIDI stuff **/
-
-#ifdef EXCLUDE_CHIP_MIDI
-#define EXCLUDE_PRO_MIDI
-#endif
-
-/** UWM - stuff **/
- 
-#if defined(EXCLUDE_SEQUENCER) && defined(EXCLUDE_AUDIO)
-#undef CONFIGURE_SOUNDCARD
-#endif
-
-#ifdef CONFIGURE_SOUNDCARD
-
-/* ****** IO-address, DMA and IRQ settings ****
-
-If your card has nonstandard I/O address or IRQ number, change defines
-   for the following settings in your kernel Makefile */
-
-#ifndef SBC_BASE
-#define SBC_BASE	0x220	/* 0x220 is the factory default. */
-#endif
-
-#ifndef SBC_IRQ
-#define SBC_IRQ		7	/* IQR7 is the factory default.	 */
-#endif
-
-#ifndef SBC_DMA
-#define SBC_DMA		1
-#endif
-
-#ifndef SB16_DMA
-#define SB16_DMA	6
-#endif
-
-#ifndef SB16MIDI_BASE
-#define SB16MIDI_BASE	0x300
-#endif
-
-#ifndef PAS_BASE
-#define PAS_BASE	0x388
-#endif
-
-#ifndef PAS_IRQ
-#define PAS_IRQ		5
-#endif
-
-#ifndef PAS_DMA
-#define PAS_DMA		3
-#endif
-
-#ifndef GUS_BASE
-#define GUS_BASE	0x220
-#endif
-
-#ifndef GUS_IRQ
-#define GUS_IRQ		15
-#endif
-
-#ifndef GUS_MIDI_IRQ
-#define GUS_MIDI_IRQ	GUS_IRQ
-#endif
-
-#ifndef GUS_DMA
-#define GUS_DMA		6
-#endif
-
-#ifndef MPU_BASE
-#define MPU_BASE	0x330
-#endif
-
-#ifndef MPU_IRQ
-#define MPU_IRQ		6
 #endif
 
 #ifndef MAX_REALTIME_FACTOR
 #define MAX_REALTIME_FACTOR	4
 #endif
 
-/************* PCM DMA buffer sizes *******************/
-
-/* If you are using high playback or recording speeds, the default buffersize
-   is too small. DSP_BUFFSIZE must be 64k or less.
-
-   A rule of thumb is 64k for PAS16, 32k for PAS+, 16k for SB Pro and
-   4k for SB.
-
-   If you change the DSP_BUFFSIZE, don't modify this file.
-   Use the make config command instead. */
-
-#ifndef DSP_BUFFSIZE
-#define DSP_BUFFSIZE		(4096)
-#endif
+/*
+ * Use always 64k buffer size. There is no reason to use shorter.
+ */
+#undef DSP_BUFFSIZE
+#define DSP_BUFFSIZE		(64*1024)
 
 #ifndef DSP_BUFFCOUNT
-#define DSP_BUFFCOUNT		2	/* 2 is recommended. */
+#define DSP_BUFFCOUNT		1	/* 1 is recommended. */
 #endif
 
-#define DMA_AUTOINIT		0x10
-
 #define FM_MONO		0x388	/* This is the I/O address used by AdLib */
+
+#ifndef CONFIG_PAS_BASE
+#define CONFIG_PAS_BASE	0x388
+#endif
 
 /* SEQ_MAX_QUEUE is the maximum number of sequencer events buffered by the
    driver. (There is no need to alter this) */
 #define SEQ_MAX_QUEUE	1024
 
-#define SBFM_MAXINSTR		(256)	/* Size of the FM Instrument
-						   bank				 */
+#define SBFM_MAXINSTR		(256)	/* Size of the FM Instrument bank */
 /* 128 instruments for general MIDI setup and 16 unassigned	 */
 
-#define SND_NDEVS	50	/* Number of supported devices */
-#define SND_DEV_CTL	0	/* Control port /dev/mixer */
-#define SND_DEV_SEQ	1	/* Sequencer output /dev/sequencer (FM
-				   synthesizer and MIDI output) */
-#define SND_DEV_MIDIN	2	/* MIDI input /dev/midin (not implemented
-				   yet) */
-#define SND_DEV_DSP	3	/* Digitized voice /dev/dsp */
-#define SND_DEV_AUDIO	4	/* Sparc compatible /dev/audio */
-#define SND_DEV_DSP16	5	/* Like /dev/dsp but 16 bits/sample */
-#define SND_DEV_STATUS	6	/* /dev/sndstatus */
-
-/* UWM ... note add new MIDI devices here..  
- *  Also do not forget to add table midi_supported[]
- *  Minor numbers for on-chip midi devices start from 15.. and 
- *  should be contiguous.. viz. 15,16,17....
- * ERROR!!!!!!!!! NO NO. Minor numbers above 15 are reserved!!!!!! Hannu
- *  Also note the max # of midi devices as MAX_MIDI_DEV
- */ 
-
-#define CMIDI_DEV_PRO  15  	/* Chip midi device == /dev/pro_midi */
-
-/*
- *  Add other midis here...
-		.
-		.
-		.
-		.
- */
+#define SND_NDEVS	256	/* Number of supported devices */
 
 #define DSP_DEFAULT_SPEED	8000
 
-#define ON		1
-#define OFF		0
-
-#define MAX_DSP_DEV	4
-#define MAX_MIXER_DEV	2
-#define MAX_SYNTH_DEV	3
-#define MAX_MIDI_DEV	4
-
-struct fileinfo {
-       	  int mode;	/* Open mode */
-       };
+#define MAX_AUDIO_DEV	5
+#define MAX_MIXER_DEV	5
+#define MAX_SYNTH_DEV	5
+#define MAX_MIDI_DEV	6
+#define MAX_TIMER_DEV	4
 
 struct address_info {
 	int io_base;
 	int irq;
 	int dma;
+	int dma2;
+	int always_detect;	/* 1=Trust me, it's there */
+	char *name;
+	int driver_use_1;	/* Driver defined field 1 */
+	int driver_use_2;	/* Driver defined field 2 */
+	int *osp;	/* OS specific info */
+	int card_subtype;	/* Driver specific. Usually 0 */
+	void *memptr;           /* Module memory chainer */
+	int slots[6];           /* To remember driver slot ids */
 };
+
+#define SYNTH_MAX_VOICES	32
+
+struct voice_alloc_info {
+		int max_voice;
+		int used_voices;
+		int ptr;		/* For device specific use */
+		unsigned short map[SYNTH_MAX_VOICES]; /* (ch << 8) | (note+1) */
+		int timestamp;
+		int alloc_times[SYNTH_MAX_VOICES];
+	};
+
+struct channel_info {
+		int pgm_num;
+		int bender_value;
+		int bender_range;
+		unsigned char controllers[128];
+	};
 
 /*
  * Process wakeup reasons
@@ -217,17 +104,51 @@ struct address_info {
 #define WK_TIMEOUT	0x02
 #define WK_SIGNAL	0x04
 #define WK_SLEEP	0x08
+#define WK_SELECT	0x10
+#define WK_ABORT	0x20
 
-#define OPEN_READ	1
-#define OPEN_WRITE	2
-#define OPEN_READWRITE	3
+#define OPEN_READ	PCM_ENABLE_INPUT
+#define OPEN_WRITE	PCM_ENABLE_OUTPUT
+#define OPEN_READWRITE	(OPEN_READ|OPEN_WRITE)
 
-#include "os.h"
+#if OPEN_READ == FMODE_READ && OPEN_WRITE == FMODE_WRITE
+
+extern __inline__ int translate_mode(struct file *file)
+{
+	return file->f_mode;
+}
+
+#else
+
+extern __inline__ int translate_mode(struct file *file)
+{
+	return ((file->f_mode & FMODE_READ) ? OPEN_READ : 0) |
+		((file->f_mode & FMODE_WRITE) ? OPEN_WRITE : 0);
+}
+
+#endif
+
+
 #include "sound_calls.h"
 #include "dev_table.h"
 
 #ifndef DEB
 #define DEB(x)
 #endif
+
+#ifndef DDB
+#define DDB(x) {}
+#endif
+
+#ifndef MDB
+#ifdef MODULE
+#define MDB(x) x
+#else
+#define MDB(x)
+#endif
+#endif
+
+#define TIMER_ARMED	121234
+#define TIMER_NOT_ARMED	1
 
 #endif

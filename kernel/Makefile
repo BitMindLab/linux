@@ -7,50 +7,26 @@
 #
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
-.S.s:
-	$(CPP) -traditional $< -o $*.s
-.c.s:
-	$(CC) $(CFLAGS) -S $<
-.s.o:
-	$(AS) -c -o $*.o $<
-.c.o:
-	$(CC) $(CFLAGS) -c $<
+O_TARGET := kernel.o
 
-OBJS  = sched.o sys_call.o traps.o irq.o dma.o fork.o \
- 	panic.o printk.o vsprintf.o sys.o module.o ksyms.o exit.o \
-	signal.o mktime.o ptrace.o ioport.o itimer.o \
-	info.o ldt.o time.o
+export-objs = signal.o sys.o kmod.o context.o ksyms.o pm.o
 
-all: kernel.o
+obj-y     = sched.o dma.o fork.o exec_domain.o panic.o printk.o \
+	    module.o exit.o itimer.o info.o time.o softirq.o resource.o \
+	    sysctl.o acct.o capability.o ptrace.o timer.o user.o \
+	    signal.o sys.o kmod.o context.o
 
-kernel.o: $(OBJS)
-	$(LD) -r -o kernel.o $(OBJS)
-	sync
+obj-$(CONFIG_UID16) += uid16.o
+obj-$(CONFIG_MODULES) += ksyms.o
+obj-$(CONFIG_PM) += pm.o
 
-sys_call.s: sys_call.S
-
-sys_call.o: sys_call.s
-
-sched.o: sched.c
-	$(CC) $(CFLAGS) $(PROFILING) -fno-omit-frame-pointer -c $<
-
-ksyms.lst: ksyms.S ../include/linux/autoconf.h
-	$(CPP) $(CFLAGS) $< > $@
- 
-ksyms.s: ksyms.sh ksyms.lst
-	sh $< > $@
-
-ksyms.o: ksyms.s
-
-dep:
-	$(CPP) -M *.c > .depend
-
-dummy:
-
-#
-# include a dependency file if one exists
-#
-ifeq (.depend,$(wildcard .depend))
-include .depend
+ifneq ($(CONFIG_IA64),y)
+# According to Alan Modra <alan@linuxcare.com.au>, the -fno-omit-frame-pointer is
+# needed for x86 only.  Why this used to be enabled for all architectures is beyond
+# me.  I suspect most platforms don't need this, but until we know that for sure
+# I turn this off for IA-64 only.  Andreas Schwab says it's also needed on m68k
+# to get a correct value for the wait-channel (WCHAN in ps). --davidm
+CFLAGS_sched.o := $(PROFILING) -fno-omit-frame-pointer
 endif
 
+include $(TOPDIR)/Rules.make

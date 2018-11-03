@@ -1,92 +1,225 @@
 #ifndef _LINUX_SIGNAL_H
 #define _LINUX_SIGNAL_H
 
-typedef unsigned int sigset_t;		/* 32 bits */
+#include <asm/signal.h>
+#include <asm/siginfo.h>
 
-#define _NSIG             32
-#define NSIG		_NSIG
-
-#define SIGHUP		 1
-#define SIGINT		 2
-#define SIGQUIT		 3
-#define SIGILL		 4
-#define SIGTRAP		 5
-#define SIGABRT		 6
-#define SIGIOT		 6
-#define SIGUNUSED	 7
-#define SIGFPE		 8
-#define SIGKILL		 9
-#define SIGUSR1		10
-#define SIGSEGV		11
-#define SIGUSR2		12
-#define SIGPIPE		13
-#define SIGALRM		14
-#define SIGTERM		15
-#define SIGSTKFLT	16
-#define SIGCHLD		17
-#define SIGCONT		18
-#define SIGSTOP		19
-#define SIGTSTP		20
-#define SIGTTIN		21
-#define SIGTTOU		22
-
+#ifdef __KERNEL__
 /*
- * Most of these aren't used yet (and perhaps never will),
- * so they are commented out.
+ * Real Time signals may be queued.
  */
 
-
-#define SIGIO		23
-#define SIGPOLL		SIGIO
-#define SIGURG		SIGIO
-#define SIGXCPU		24
-#define SIGXFSZ		25
-
-
-#define SIGVTALRM	26
-#define SIGPROF		27
-
-#define SIGWINCH	28
-
-/*
-#define SIGLOST		29
-*/
-#define SIGPWR		30
-
-/* Arggh. Bad user source code wants this.. */
-#define SIGBUS		SIGUNUSED
-
-/*
- * sa_flags values: SA_STACK is not currently supported, but will allow the
- * usage of signal stacks by using the (now obsolete) sa_restorer field in
- * the sigaction structure as a stack pointer. This is now possible due to
- * the changes in signal handling. LBT 010493.
- * SA_INTERRUPT is a no-op, but left due to historical reasons. Use the
- * SA_RESTART flag to get restarting signals (which were the default long ago)
- */
-#define SA_NOCLDSTOP	1
-#define SA_STACK	0x08000000
-#define SA_RESTART	0x10000000
-#define SA_INTERRUPT	0x20000000
-#define SA_NOMASK	0x40000000
-#define SA_ONESHOT	0x80000000
-
-#define SIG_BLOCK          0	/* for blocking signals */
-#define SIG_UNBLOCK        1	/* for unblocking signals */
-#define SIG_SETMASK        2	/* for setting the signal mask */
-
-/* Type of a signal handler.  */
-typedef void (*__sighandler_t)(int);
-
-#define SIG_DFL	((__sighandler_t)0)	/* default signal handling */
-#define SIG_IGN	((__sighandler_t)1)	/* ignore signal */
-#define SIG_ERR	((__sighandler_t)-1)	/* error return from signal */
-
-struct sigaction {
-	__sighandler_t sa_handler;
-	sigset_t sa_mask;
-	int sa_flags;
-	void (*sa_restorer)(void);
+struct sigqueue {
+	struct sigqueue *next;
+	siginfo_t info;
 };
 
-#endif
+struct sigpending {
+	struct sigqueue *head, **tail;
+	sigset_t signal;
+};
+
+/*
+ * Define some primitives to manipulate sigset_t.
+ */
+
+#ifndef __HAVE_ARCH_SIG_BITOPS
+#include <asm/bitops.h>
+
+/* We don't use <asm/bitops.h> for these because there is no need to
+   be atomic.  */
+static inline void sigaddset(sigset_t *set, int _sig)
+{
+	unsigned long sig = _sig - 1;
+	if (_NSIG_WORDS == 1)
+		set->sig[0] |= 1UL << sig;
+	else
+		set->sig[sig / _NSIG_BPW] |= 1UL << (sig % _NSIG_BPW);
+}
+
+static inline void sigdelset(sigset_t *set, int _sig)
+{
+	unsigned long sig = _sig - 1;
+	if (_NSIG_WORDS == 1)
+		set->sig[0] &= ~(1UL << sig);
+	else
+		set->sig[sig / _NSIG_BPW] &= ~(1UL << (sig % _NSIG_BPW));
+}
+
+static inline int sigismember(sigset_t *set, int _sig)
+{
+	unsigned long sig = _sig - 1;
+	if (_NSIG_WORDS == 1)
+		return 1 & (set->sig[0] >> sig);
+	else
+		return 1 & (set->sig[sig / _NSIG_BPW] >> (sig % _NSIG_BPW));
+}
+
+static inline int sigfindinword(unsigned long word)
+{
+	return ffz(~word);
+}
+
+#define sigmask(sig)	(1UL << ((sig) - 1))
+
+#endif /* __HAVE_ARCH_SIG_BITOPS */
+
+#ifndef __HAVE_ARCH_SIG_SETOPS
+#include <linux/string.h>
+
+#define _SIG_SET_BINOP(name, op)					\
+static inline void name(sigset_t *r, const sigset_t *a, const sigset_t *b) \
+{									\
+	unsigned long a0, a1, a2, a3, b0, b1, b2, b3;			\
+	unsigned long i;						\
+									\
+	for (i = 0; i < _NSIG_WORDS/4; ++i) {				\
+		a0 = a->sig[4*i+0]; a1 = a->sig[4*i+1];			\
+		a2 = a->sig[4*i+2]; a3 = a->sig[4*i+3];			\
+		b0 = b->sig[4*i+0]; b1 = b->sig[4*i+1];			\
+		b2 = b->sig[4*i+2]; b3 = b->sig[4*i+3];			\
+		r->sig[4*i+0] = op(a0, b0);				\
+		r->sig[4*i+1] = op(a1, b1);				\
+		r->sig[4*i+2] = op(a2, b2);				\
+		r->sig[4*i+3] = op(a3, b3);				\
+	}								\
+	switch (_NSIG_WORDS % 4) {					\
+	    case 3:							\
+		a0 = a->sig[4*i+0]; a1 = a->sig[4*i+1]; a2 = a->sig[4*i+2]; \
+		b0 = b->sig[4*i+0]; b1 = b->sig[4*i+1]; b2 = b->sig[4*i+2]; \
+		r->sig[4*i+0] = op(a0, b0);				\
+		r->sig[4*i+1] = op(a1, b1);				\
+		r->sig[4*i+2] = op(a2, b2);				\
+		break;							\
+	    case 2:							\
+		a0 = a->sig[4*i+0]; a1 = a->sig[4*i+1];			\
+		b0 = b->sig[4*i+0]; b1 = b->sig[4*i+1];			\
+		r->sig[4*i+0] = op(a0, b0);				\
+		r->sig[4*i+1] = op(a1, b1);				\
+		break;							\
+	    case 1:							\
+		a0 = a->sig[4*i+0]; b0 = b->sig[4*i+0];			\
+		r->sig[4*i+0] = op(a0, b0);				\
+		break;							\
+	}								\
+}
+
+#define _sig_or(x,y)	((x) | (y))
+_SIG_SET_BINOP(sigorsets, _sig_or)
+
+#define _sig_and(x,y)	((x) & (y))
+_SIG_SET_BINOP(sigandsets, _sig_and)
+
+#define _sig_nand(x,y)	((x) & ~(y))
+_SIG_SET_BINOP(signandsets, _sig_nand)
+
+#undef _SIG_SET_BINOP
+#undef _sig_or
+#undef _sig_and
+#undef _sig_nand
+
+#define _SIG_SET_OP(name, op)						\
+static inline void name(sigset_t *set)					\
+{									\
+	unsigned long i;						\
+									\
+	for (i = 0; i < _NSIG_WORDS/4; ++i) {				\
+		set->sig[4*i+0] = op(set->sig[4*i+0]);			\
+		set->sig[4*i+1] = op(set->sig[4*i+1]);			\
+		set->sig[4*i+2] = op(set->sig[4*i+2]);			\
+		set->sig[4*i+3] = op(set->sig[4*i+3]);			\
+	}								\
+	switch (_NSIG_WORDS % 4) {					\
+	    case 3: set->sig[4*i+2] = op(set->sig[4*i+2]);		\
+	    case 2: set->sig[4*i+1] = op(set->sig[4*i+1]);		\
+	    case 1: set->sig[4*i+0] = op(set->sig[4*i+0]);		\
+	}								\
+}
+
+#define _sig_not(x)	(~(x))
+_SIG_SET_OP(signotset, _sig_not)
+
+#undef _SIG_SET_OP
+#undef _sig_not
+
+static inline void sigemptyset(sigset_t *set)
+{
+	switch (_NSIG_WORDS) {
+	default:
+		memset(set, 0, sizeof(sigset_t));
+		break;
+	case 2: set->sig[1] = 0;
+	case 1:	set->sig[0] = 0;
+		break;
+	}
+}
+
+static inline void sigfillset(sigset_t *set)
+{
+	switch (_NSIG_WORDS) {
+	default:
+		memset(set, -1, sizeof(sigset_t));
+		break;
+	case 2: set->sig[1] = -1;
+	case 1:	set->sig[0] = -1;
+		break;
+	}
+}
+
+extern char * render_sigset_t(sigset_t *set, char *buffer);
+
+/* Some extensions for manipulating the low 32 signals in particular.  */
+
+static inline void sigaddsetmask(sigset_t *set, unsigned long mask)
+{
+	set->sig[0] |= mask;
+}
+
+static inline void sigdelsetmask(sigset_t *set, unsigned long mask)
+{
+	set->sig[0] &= ~mask;
+}
+
+static inline int sigtestsetmask(sigset_t *set, unsigned long mask)
+{
+	return (set->sig[0] & mask) != 0;
+}
+
+static inline void siginitset(sigset_t *set, unsigned long mask)
+{
+	set->sig[0] = mask;
+	switch (_NSIG_WORDS) {
+	default:
+		memset(&set->sig[1], 0, sizeof(long)*(_NSIG_WORDS-1));
+		break;
+	case 2: set->sig[1] = 0;
+	case 1: ;
+	}
+}
+
+static inline void siginitsetinv(sigset_t *set, unsigned long mask)
+{
+	set->sig[0] = ~mask;
+	switch (_NSIG_WORDS) {
+	default:
+		memset(&set->sig[1], -1, sizeof(long)*(_NSIG_WORDS-1));
+		break;
+	case 2: set->sig[1] = -1;
+	case 1: ;
+	}
+}
+
+#endif /* __HAVE_ARCH_SIG_SETOPS */
+
+static inline void init_sigpending(struct sigpending *sig)
+{
+	sigemptyset(&sig->signal);
+	sig->head = NULL;
+	sig->tail = &sig->head;
+}
+
+extern long do_sigpending(void *, unsigned long);
+
+#endif /* __KERNEL__ */
+
+#endif /* _LINUX_SIGNAL_H */

@@ -10,16 +10,12 @@
 
 #ifndef _MC146818RTC_H
 #define _MC146818RTC_H
-#include <asm/io.h>
 
-#define CMOS_READ(addr) ({ \
-outb_p(addr|0x80,0x70); \
-inb_p(0x71); \
-})
-#define CMOS_WRITE(val, addr) ({ \
-outb_p(addr|0x80,0x70); \
-outb_p(val,0x71); \
-})
+#include <asm/io.h>
+#include <linux/rtc.h>			/* get the user-level API */
+#include <asm/mc146818rtc.h>		/* register access macros */
+
+extern spinlock_t rtc_lock;		/* serialize CMOS RAM access */
 
 /**********************************************************************
  * register summary

@@ -10,191 +10,201 @@
 #include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/stat.h>
+#include <linux/file.h>
 #include <linux/locks.h>
 #include <linux/limits.h>
+#define __NO_VERSION__
+#include <linux/module.h>
+#include <linux/smp_lock.h>
 
 #include <asm/system.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
-void proc_put_inode(struct inode *inode)
+extern void free_proc_entry(struct proc_dir_entry *);
+
+struct proc_dir_entry * de_get(struct proc_dir_entry *de)
 {
-	if (inode->i_nlink)
-		return;
-	inode->i_size = 0;
+	if (de)
+		atomic_inc(&de->count);
+	return de;
 }
 
-void proc_put_super(struct super_block *sb)
+/*
+ * Decrements the use count and checks for deferred deletion.
+ */
+void de_put(struct proc_dir_entry *de)
 {
-	lock_super(sb);
-	sb->s_dev = 0;
-	unlock_super(sb);
+	if (de) {	
+		lock_kernel();		
+		if (!atomic_read(&de->count)) {
+			printk("de_put: entry %s already free!\n", de->name);
+			unlock_kernel();
+			return;
+		}
+
+		if (atomic_dec_and_test(&de->count)) {
+			if (de->deleted) {
+				printk("de_put: deferred delete of %s\n",
+					de->name);
+				free_proc_entry(de);
+			}
+		}		
+		unlock_kernel();
+	}
+}
+
+/*
+ * Decrement the use count of the proc_dir_entry.
+ */
+static void proc_delete_inode(struct inode *inode)
+{
+	struct proc_dir_entry *de = inode->u.generic_ip;
+
+	inode->i_state = I_CLEAR;
+
+	if (PROC_INODE_PROPER(inode)) {
+		proc_pid_delete_inode(inode);
+		return;
+	}
+	if (de) {
+		if (de->owner)
+			__MOD_DEC_USE_COUNT(de->owner);
+		de_put(de);
+	}
+}
+
+struct vfsmount *proc_mnt;
+
+static void proc_read_inode(struct inode * inode)
+{
+	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
+}
+
+static int proc_statfs(struct super_block *sb, struct statfs *buf)
+{
+	buf->f_type = PROC_SUPER_MAGIC;
+	buf->f_bsize = PAGE_SIZE/sizeof(long);
+	buf->f_bfree = 0;
+	buf->f_bavail = 0;
+	buf->f_ffree = 0;
+	buf->f_namelen = NAME_MAX;
+	return 0;
 }
 
 static struct super_operations proc_sops = { 
-	proc_read_inode,
-	NULL,
-	proc_write_inode,
-	proc_put_inode,
-	proc_put_super,
-	NULL,
-	proc_statfs,
-	NULL
+	read_inode:	proc_read_inode,
+	put_inode:	force_delete,
+	delete_inode:	proc_delete_inode,
+	statfs:		proc_statfs,
 };
+
+
+static int parse_options(char *options,uid_t *uid,gid_t *gid)
+{
+	char *this_char,*value;
+
+	*uid = current->uid;
+	*gid = current->gid;
+	if (!options) return 1;
+	for (this_char = strtok(options,","); this_char; this_char = strtok(NULL,",")) {
+		if ((value = strchr(this_char,'=')) != NULL)
+			*value++ = 0;
+		if (!strcmp(this_char,"uid")) {
+			if (!value || !*value)
+				return 0;
+			*uid = simple_strtoul(value,&value,0);
+			if (*value)
+				return 0;
+		}
+		else if (!strcmp(this_char,"gid")) {
+			if (!value || !*value)
+				return 0;
+			*gid = simple_strtoul(value,&value,0);
+			if (*value)
+				return 0;
+		}
+		else return 1;
+	}
+	return 1;
+}
+
+struct inode * proc_get_inode(struct super_block * sb, int ino,
+				struct proc_dir_entry * de)
+{
+	struct inode * inode;
+
+	/*
+	 * Increment the use count so the dir entry can't disappear.
+	 */
+	de_get(de);
+#if 1
+/* shouldn't ever happen */
+if (de && de->deleted)
+printk("proc_iget: using deleted entry %s, count=%d\n", de->name, atomic_read(&de->count));
+#endif
+
+	inode = iget(sb, ino);
+	if (!inode)
+		goto out_fail;
+	
+	inode->u.generic_ip = (void *) de;
+	if (de) {
+		if (de->mode) {
+			inode->i_mode = de->mode;
+			inode->i_uid = de->uid;
+			inode->i_gid = de->gid;
+		}
+		if (de->size)
+			inode->i_size = de->size;
+		if (de->nlink)
+			inode->i_nlink = de->nlink;
+		if (de->owner)
+			__MOD_INC_USE_COUNT(de->owner);
+		if (S_ISBLK(de->mode)||S_ISCHR(de->mode)||S_ISFIFO(de->mode))
+			init_special_inode(inode,de->mode,kdev_t_to_nr(de->rdev));
+		else {
+			if (de->proc_iops)
+				inode->i_op = de->proc_iops;
+			if (de->proc_fops)
+				inode->i_fop = de->proc_fops;
+		}
+	}
+
+out:
+	return inode;
+
+out_fail:
+	de_put(de);
+	goto out;
+}			
 
 struct super_block *proc_read_super(struct super_block *s,void *data, 
 				    int silent)
 {
-	lock_super(s);
+	struct inode * root_inode;
+	struct task_struct *p;
+
 	s->s_blocksize = 1024;
 	s->s_blocksize_bits = 10;
 	s->s_magic = PROC_SUPER_MAGIC;
 	s->s_op = &proc_sops;
-	unlock_super(s);
-	if (!(s->s_mounted = iget(s,PROC_ROOT_INO))) {
-		s->s_dev = 0;
-		printk("get root inode failed\n");
-		return NULL;
-	}
+	root_inode = proc_get_inode(s, PROC_ROOT_INO, &proc_root);
+	if (!root_inode)
+		goto out_no_root;
+	/*
+	 * Fixup the root inode's nlink value
+	 */
+	read_lock(&tasklist_lock);
+	for_each_task(p) if (p->pid) root_inode->i_nlink++;
+	read_unlock(&tasklist_lock);
+	s->s_root = d_alloc_root(root_inode);
+	if (!s->s_root)
+		goto out_no_root;
+	parse_options(data, &root_inode->i_uid, &root_inode->i_gid);
 	return s;
-}
 
-void proc_statfs(struct super_block *sb, struct statfs *buf)
-{
-	put_fs_long(PROC_SUPER_MAGIC, &buf->f_type);
-	put_fs_long(PAGE_SIZE/sizeof(long), &buf->f_bsize);
-	put_fs_long(0, &buf->f_blocks);
-	put_fs_long(0, &buf->f_bfree);
-	put_fs_long(0, &buf->f_bavail);
-	put_fs_long(0, &buf->f_files);
-	put_fs_long(0, &buf->f_ffree);
-	put_fs_long(NAME_MAX, &buf->f_namelen);
-	/* Don't know what value to put in buf->f_fsid */
-}
-
-void proc_read_inode(struct inode * inode)
-{
-	unsigned long ino, pid;
-	struct task_struct * p;
-	int i;
-	
-	inode->i_op = NULL;
-	inode->i_mode = 0;
-	inode->i_uid = 0;
-	inode->i_gid = 0;
-	inode->i_nlink = 1;
-	inode->i_size = 0;
-	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
-	inode->i_blocks = 0;
-	inode->i_blksize = 1024;
-	ino = inode->i_ino;
-	pid = ino >> 16;
-	p = task[0];
-	for (i = 0; i < NR_TASKS ; i++)
-		if ((p = task[i]) && (p->pid == pid))
-			break;
-	if (!p || i >= NR_TASKS)
-		return;
-	if (ino == PROC_ROOT_INO) {
-		inode->i_mode = S_IFDIR | S_IRUGO | S_IXUGO;
-		inode->i_nlink = 2;
-		for (i = 1 ; i < NR_TASKS ; i++)
-			if (task[i])
-				inode->i_nlink++;
-		inode->i_op = &proc_root_inode_operations;
-		return;
-	}
-	if ((ino >= 128) && (ino <= 160)) { /* files within /proc/net */
-		inode->i_mode = S_IFREG | S_IRUGO;
-		inode->i_op = &proc_net_inode_operations;
-		return;
-	}
-	if (!pid) {
-		switch (ino) {
-			case 5:
-				inode->i_mode = S_IFREG | S_IRUGO;
-				inode->i_op = &proc_kmsg_inode_operations;
-				break;
-			case 8: /* for the net directory */
-				inode->i_mode = S_IFDIR | S_IRUGO | S_IXUGO;
-				inode->i_nlink = 2;
-				inode->i_op = &proc_net_inode_operations;
-				break;
-			case 14:
-				inode->i_mode = S_IFREG | S_IRUSR;
-				inode->i_op = &proc_array_inode_operations;
-				inode->i_size = high_memory + PAGE_SIZE;
-				break;
-			default:
-				inode->i_mode = S_IFREG | S_IRUGO;
-				inode->i_op = &proc_array_inode_operations;
-				break;
-		}
-		return;
-	}
-	ino &= 0x0000ffff;
-	inode->i_uid = p->euid;
-	inode->i_gid = p->egid;
-	switch (ino) {
-		case 2:
-			inode->i_nlink = 4;
-			inode->i_mode = S_IFDIR | S_IRUGO | S_IXUGO;
-			inode->i_op = &proc_base_inode_operations;
-			return;
-		case 3:
-			inode->i_op = &proc_mem_inode_operations;
-			inode->i_mode = S_IFREG | S_IRUSR | S_IWUSR;
-			return;
-		case 4:
-		case 5:
-		case 6:
-			inode->i_op = &proc_link_inode_operations;
-			inode->i_size = 64;
-			inode->i_mode = S_IFLNK | S_IRWXU;
-			return;
-		case 7:
-		case 8:
-			inode->i_mode = S_IFDIR | S_IRUSR | S_IXUSR;
-			inode->i_op = &proc_fd_inode_operations;
-			inode->i_nlink = 2;
-			return;
-		case 9:
-		case 10:
-		case 11:
-		case 12:
-		case 15:
-			inode->i_mode = S_IFREG | S_IRUGO;
-			inode->i_op = &proc_array_inode_operations;
-			return;
-	}
-	switch (ino >> 8) {
-		case 1:
-			ino &= 0xff;
-			if (ino >= NR_OPEN || !p->filp[ino])
-				return;
-			inode->i_op = &proc_link_inode_operations;
-			inode->i_size = 64;
-			inode->i_mode = S_IFLNK | S_IRWXU;
-			return;
-		case 2:
-			ino &= 0xff;
-			{
-				int j = 0;
-				struct vm_area_struct * mpnt;
-				for (mpnt = p->mmap ; mpnt ; mpnt = mpnt->vm_next)
-					if(mpnt->vm_inode)
-						j++;
-				if (ino >= j)
-					return;
-			}
-			inode->i_op = &proc_link_inode_operations;
-			inode->i_size = 64;
-			inode->i_mode = S_IFLNK | S_IRWXU;
-			return;
-	}
-	return;
-}
-
-void proc_write_inode(struct inode * inode)
-{
-	inode->i_dirt=0;
+out_no_root:
+	printk("proc_read_super: get root inode failed\n");
+	iput(root_inode);
+	return NULL;
 }

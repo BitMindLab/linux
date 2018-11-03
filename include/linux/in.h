@@ -18,33 +18,100 @@
 #ifndef _LINUX_IN_H
 #define _LINUX_IN_H
 
+#include <linux/types.h>
 
 /* Standard well-defined IP protocols.  */
 enum {
   IPPROTO_IP = 0,		/* Dummy protocol for TCP		*/
   IPPROTO_ICMP = 1,		/* Internet Control Message Protocol	*/
-  IPPROTO_GGP = 2,		/* Gateway Protocol (deprecated)	*/
+  IPPROTO_IGMP = 2,		/* Internet Group Management Protocol	*/
+  IPPROTO_IPIP = 4,		/* IPIP tunnels (older KA9Q tunnels use 94) */
   IPPROTO_TCP = 6,		/* Transmission Control Protocol	*/
   IPPROTO_EGP = 8,		/* Exterior Gateway Protocol		*/
   IPPROTO_PUP = 12,		/* PUP protocol				*/
   IPPROTO_UDP = 17,		/* User Datagram Protocol		*/
   IPPROTO_IDP = 22,		/* XNS IDP protocol			*/
+  IPPROTO_RSVP = 46,		/* RSVP protocol			*/
+  IPPROTO_GRE = 47,		/* Cisco GRE tunnels (rfc 1701,1702)	*/
 
-  IPPROTO_RAW = 255,		/* Raw IP packets			*/
+  IPPROTO_IPV6	 = 41,		/* IPv6-in-IPv4 tunnelling		*/
+
+  IPPROTO_PIM    = 103,		/* Protocol Independent Multicast	*/
+
+  IPPROTO_ESP = 50,            /* Encapsulation Security Payload protocol */
+  IPPROTO_AH = 51,             /* Authentication Header protocol       */
+  IPPROTO_COMP   = 108,                /* Compression Header protocol */
+
+  IPPROTO_RAW	 = 255,		/* Raw IP packets			*/
   IPPROTO_MAX
 };
 
 
 /* Internet address. */
 struct in_addr {
-	unsigned long int	s_addr;
+	__u32	s_addr;
 };
 
+#define IP_TOS		1
+#define IP_TTL		2
+#define IP_HDRINCL	3
+#define IP_OPTIONS	4
+#define IP_ROUTER_ALERT	5
+#define IP_RECVOPTS	6
+#define IP_RETOPTS	7
+#define IP_PKTINFO	8
+#define IP_PKTOPTIONS	9
+#define IP_MTU_DISCOVER	10
+#define IP_RECVERR	11
+#define IP_RECVTTL	12
+#define	IP_RECVTOS	13
+#define IP_MTU		14
+#define IP_FREEBIND	15
+
+/* BSD compatibility */
+#define IP_RECVRETOPTS	IP_RETOPTS
+
+/* IP_MTU_DISCOVER values */
+#define IP_PMTUDISC_DONT		0	/* Never send DF frames */
+#define IP_PMTUDISC_WANT		1	/* Use per route hints	*/
+#define IP_PMTUDISC_DO			2	/* Always DF		*/
+
+#define IP_MULTICAST_IF			32
+#define IP_MULTICAST_TTL 		33
+#define IP_MULTICAST_LOOP 		34
+#define IP_ADD_MEMBERSHIP		35
+#define IP_DROP_MEMBERSHIP		36
+
+/* These need to appear somewhere around here */
+#define IP_DEFAULT_MULTICAST_TTL        1
+#define IP_DEFAULT_MULTICAST_LOOP       1
+
+/* Request struct for multicast socket ops */
+
+struct ip_mreq 
+{
+	struct in_addr imr_multiaddr;	/* IP multicast address of group */
+	struct in_addr imr_interface;	/* local IP address of interface */
+};
+
+struct ip_mreqn
+{
+	struct in_addr	imr_multiaddr;		/* IP multicast address of group */
+	struct in_addr	imr_address;		/* local IP address of interface */
+	int		imr_ifindex;		/* Interface index */
+};
+
+struct in_pktinfo
+{
+	int		ipi_ifindex;
+	struct in_addr	ipi_spec_dst;
+	struct in_addr	ipi_addr;
+};
 
 /* Structure describing an Internet (IP) socket address. */
 #define __SOCK_SIZE__	16		/* sizeof(struct sockaddr)	*/
 struct sockaddr_in {
-  short int		sin_family;	/* Address family		*/
+  sa_family_t		sin_family;	/* Address family		*/
   unsigned short int	sin_port;	/* Port number			*/
   struct in_addr	sin_addr;	/* Internet address		*/
 
@@ -72,16 +139,17 @@ struct sockaddr_in {
 #define	IN_CLASSB_HOST		(0xffffffff & ~IN_CLASSB_NET)
 #define	IN_CLASSB_MAX		65536
 
-#define	IN_CLASSC(a)		((((long int) (a)) & 0xc0000000) == 0xc0000000)
+#define	IN_CLASSC(a)		((((long int) (a)) & 0xe0000000) == 0xc0000000)
 #define	IN_CLASSC_NET		0xffffff00
 #define	IN_CLASSC_NSHIFT	8
 #define	IN_CLASSC_HOST		(0xffffffff & ~IN_CLASSC_NET)
 
 #define	IN_CLASSD(a)		((((long int) (a)) & 0xf0000000) == 0xe0000000)
 #define	IN_MULTICAST(a)		IN_CLASSD(a)
+#define IN_MULTICAST_NET	0xF0000000
 
-#define	IN_EXPERIMENTAL(a)	((((long int) (a)) & 0xe0000000) == 0xe0000000)
-#define	IN_BADCLASS(a)		((((long int) (a)) & 0xf0000000) == 0xf0000000)
+#define	IN_EXPERIMENTAL(a)	((((long int) (a)) & 0xf0000000) == 0xf0000000)
+#define	IN_BADCLASS(a)		IN_EXPERIMENTAL((a))
 
 /* Address to accept any incoming messages. */
 #define	INADDR_ANY		((unsigned long int) 0x00000000)
@@ -90,95 +158,33 @@ struct sockaddr_in {
 #define	INADDR_BROADCAST	((unsigned long int) 0xffffffff)
 
 /* Address indicating an error return. */
-#define	INADDR_NONE		0xffffffff
+#define	INADDR_NONE		((unsigned long int) 0xffffffff)
 
 /* Network number for local host loopback. */
 #define	IN_LOOPBACKNET		127
 
 /* Address to loopback in software to local host.  */
-#define	INADDR_LOOPBACK		0x7f000001	/* 127.0.0.1		*/
+#define	INADDR_LOOPBACK		0x7f000001	/* 127.0.0.1   */
+#define	IN_LOOPBACK(a)		((((long int) (a)) & 0xff000000) == 0x7f000000)
+
+/* Defines for Multicast INADDR */
+#define INADDR_UNSPEC_GROUP   	0xe0000000U	/* 224.0.0.0   */
+#define INADDR_ALLHOSTS_GROUP 	0xe0000001U	/* 224.0.0.1   */
+#define INADDR_ALLRTRS_GROUP    0xe0000002U	/* 224.0.0.2 */
+#define INADDR_MAX_LOCAL_GROUP  0xe00000ffU	/* 224.0.0.255 */
 
 
-/*
- * Options for use with `getsockopt' and `setsockopt' at
- * the IP level.  LINUX does not yet have the IP_OPTIONS
- * option (grin), so we undefine it for now.- HJ && FvK
- */
-#if 0
-# define IP_OPTIONS	1		/* IP per-packet options	*/
-#endif
-#define IP_HDRINCL	2		/* raw packet header option	*/
+/* <asm/byteorder.h> contains the htonl type stuff.. */
+#include <asm/byteorder.h> 
 
+#ifdef __KERNEL__
+/* Some random defines to make it easier in the kernel.. */
+#define LOOPBACK(x)	(((x) & htonl(0xff000000)) == htonl(0x7f000000))
+#define MULTICAST(x)	(((x) & htonl(0xf0000000)) == htonl(0xe0000000))
+#define BADCLASS(x)	(((x) & htonl(0xf0000000)) == htonl(0xf0000000))
+#define ZERONET(x)	(((x) & htonl(0xff000000)) == htonl(0x00000000))
+#define LOCAL_MCAST(x)	(((x) & htonl(0xFFFFFF00)) == htonl(0xE0000000))
 
-/* Linux Internet number representation function declarations. */
-#undef ntohl
-#undef ntohs
-#undef htonl
-#undef htons
-
-extern unsigned long int	ntohl(unsigned long int);
-extern unsigned short int	ntohs(unsigned short int);
-extern unsigned long int	htonl(unsigned long int);
-extern unsigned short int	htons(unsigned short int);
-
-static __inline__ unsigned long int
-__ntohl(unsigned long int x)
-{
-	__asm__("xchgb %b0,%h0\n\t"	/* swap lower bytes	*/
-		"rorl $16,%0\n\t"	/* swap words		*/
-		"xchgb %b0,%h0"		/* swap higher bytes	*/
-		:"=q" (x)
-		: "0" (x));
-	return x;
-}
-
-static __inline__ unsigned long int
-__constant_ntohl(unsigned long int x)
-{
-	return (((x & 0x000000ff) << 24) |
-		((x & 0x0000ff00) <<  8) |
-		((x & 0x00ff0000) >>  8) |
-		((x & 0xff000000) >> 24));
-}
-
-static __inline__ unsigned short int
-__ntohs(unsigned short int x)
-{
-	__asm__("xchgb %b0,%h0"		/* swap bytes		*/
-		: "=q" (x)
-		:  "0" (x));
-	return x;
-}
-
-static __inline__ unsigned short int
-__constant_ntohs(unsigned short int x)
-{
-	return (((x & 0x00ff) << 8) |
-		((x & 0xff00) >> 8));
-}
-
-#define __htonl(x) __ntohl(x)
-#define __htons(x) __ntohs(x)
-#define __constant_htonl(x) __constant_ntohl(x)
-#define __constant_htons(x) __constant_ntohs(x)
-
-#ifdef  __OPTIMIZE__
-#  define ntohl(x) \
-(__builtin_constant_p((x)) ? \
- __constant_ntohl((x)) : \
- __ntohl((x)))
-#  define ntohs(x) \
-(__builtin_constant_p((x)) ? \
- __constant_ntohs((x)) : \
- __ntohs((x)))
-#  define htonl(x) \
-(__builtin_constant_p((x)) ? \
- __constant_htonl((x)) : \
- __htonl((x)))
-#  define htons(x) \
-(__builtin_constant_p((x)) ? \
- __constant_htons((x)) : \
- __htons((x)))
 #endif
 
 #endif	/* _LINUX_IN_H */

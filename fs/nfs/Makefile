@@ -1,31 +1,20 @@
 #
-# Makefile for the linux nfs-filesystem routines.
+# Makefile for the Linux nfs filesystem routines.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
+# unless it's something special (not a .c file).
 #
-# Note 2! The CFLAGS definitions are now in the main makefile...
+# Note 2! The CFLAGS definitions are now in the main makefile.
 
-.c.s:
-	$(CC) $(CFLAGS) -S $<
-.c.o:
-	$(CC) $(CFLAGS) -c $<
-.s.o:
-	$(AS) -o $*.o $<
+O_TARGET := nfs.o
 
-OBJS=	proc.o sock.o inode.o file.o dir.o \
-	symlink.o mmap.o
+obj-y    := inode.o file.o read.o write.o dir.o symlink.o proc.o \
+	    nfs2xdr.o flushd.o unlink.o
 
-nfs.o: $(OBJS)
-	$(LD) -r -o nfs.o $(OBJS)
+obj-$(CONFIG_ROOT_NFS) += nfsroot.o mount_clnt.o      
+obj-$(CONFIG_NFS_V3) += nfs3proc.o nfs3xdr.o
 
-dep:
-	$(CPP) -M *.c > .depend
+obj-m   := $(O_TARGET)
 
-#
-# include a dependency file if one exists
-#
-ifeq (.depend,$(wildcard .depend))
-include .depend
-endif
+include $(TOPDIR)/Rules.make

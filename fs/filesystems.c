@@ -8,69 +8,58 @@
 
 #include <linux/config.h>
 #include <linux/fs.h>
-#ifdef CONFIG_MINIX_FS
-#include <linux/minix_fs.h>
-#endif
-#ifdef CONFIG_XIA_FS
-#include <linux/xia_fs.h>
-#endif
-#ifdef CONFIG_PROC_FS
-#include <linux/proc_fs.h>
-#endif
-#ifdef CONFIG_EXT2_FS
-#include <linux/ext2_fs.h>
-#endif
-#ifdef CONFIG_EXT_FS
-#include <linux/ext_fs.h>
-#endif
-#ifdef CONFIG_MSDOS_FS
-#include <linux/msdos_fs.h>
-#endif
-#ifdef CONFIG_NFS_FS
+
+#include <linux/devfs_fs_kernel.h>
 #include <linux/nfs_fs.h>
-#endif
-#ifdef CONFIG_ISO9660_FS
-#include <linux/iso_fs.h>
-#endif
-#ifdef CONFIG_HPFS_FS
-#include <linux/hpfs_fs.h>
-#endif
-#ifdef CONFIG_SYSV_FS
-#include <linux/sysv_fs.h>
+#include <linux/auto_fs.h>
+#include <linux/devpts_fs.h>
+#include <linux/major.h>
+#include <linux/smp.h>
+#include <linux/smp_lock.h>
+#include <linux/kmod.h>
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/nfsd/interface.h>
+
+#ifdef CONFIG_DEVPTS_FS
+extern int init_devpts_fs(void);
 #endif
 
-struct file_system_type file_systems[] = {
-#ifdef CONFIG_MINIX_FS
-	{minix_read_super,	"minix",	1},
-#endif
-#ifdef CONFIG_EXT_FS
-	{ext_read_super,	"ext",		1},
-#endif
-#ifdef CONFIG_EXT2_FS
-	{ext2_read_super,	"ext2",		1},
-#endif
-#ifdef CONFIG_XIA_FS
-	{xiafs_read_super,	"xiafs",	1},
-#endif
-#ifdef CONFIG_MSDOS_FS
-	{msdos_read_super,	"msdos",	1},
-#endif
-#ifdef CONFIG_PROC_FS
-	{proc_read_super,	"proc",		0},
-#endif
+void __init filesystem_setup(void)
+{
+	init_devfs_fs();  /*  Header file may make this empty  */
+
 #ifdef CONFIG_NFS_FS
-	{nfs_read_super,	"nfs",		0},
+	init_nfs_fs();
 #endif
-#ifdef CONFIG_ISO9660_FS
-	{isofs_read_super,	"iso9660",	1},
+
+#ifdef CONFIG_DEVPTS_FS
+	init_devpts_fs();
 #endif
-#ifdef CONFIG_SYSV_FS
-	{sysv_read_super,	"xenix",	1},
-	{sysv_read_super,	"sysv",		1},
-	{sysv_read_super,	"coherent",	1},
-#endif
-#ifdef CONFIG_HPFS_FS
-	{hpfs_read_super,	"hpfs",		1},
-#endif
-	{NULL,			NULL,		0}
-};
+}
+
+#if defined(CONFIG_NFSD_MODULE)
+struct nfsd_linkage *nfsd_linkage = NULL;
+
+long
+asmlinkage sys_nfsservctl(int cmd, void *argp, void *resp)
+{
+	int ret = -ENOSYS;
+	
+	lock_kernel();
+
+	if (nfsd_linkage ||
+	    (request_module ("nfsd") == 0 && nfsd_linkage))
+		ret = nfsd_linkage->do_nfsservctl(cmd, argp, resp);
+
+	unlock_kernel();
+	return ret;
+}
+EXPORT_SYMBOL(nfsd_linkage);
+
+#elif ! defined (CONFIG_NFSD)
+asmlinkage int sys_nfsservctl(int cmd, void *argp, void *resp)
+{
+	return -ENOSYS;
+}
+#endif /* CONFIG_NFSD */

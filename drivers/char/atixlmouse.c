@@ -5,19 +5,32 @@
  * Uses VFS interface for linux 0.98 (01OCT92)
  *
  * Modified by Chris Colohan (colohan@eecg.toronto.edu)
+ * Modularised 8-Sep-95 Philip Blundell <pjb27@cam.ac.uk>
  *
- * version 0.3
+ * Converted to use new generic busmouse code.  5 Apr 1998
+ *   Russell King <rmk@arm.uk.linux.org>
+ *
+ * version 0.3a
  */
+
+#include <linux/module.h>
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/signal.h>
 #include <linux/errno.h>
+#include <linux/miscdevice.h>
+#include <linux/random.h>
+#include <linux/poll.h>
+#include <linux/init.h>
+#include <linux/ioport.h>
 
 #include <asm/io.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/irq.h>
+
+#include "busmouse.h"
 
 #define ATIXL_MOUSE_IRQ		5 /* H/W interrupt # set up on ATIXL board */
 #define ATIXL_BUSMOUSE		3 /* Minor device # (mknod c 10 3 /dev/bm) */
@@ -52,18 +65,9 @@
 
 /* Same general mouse structure */
 
-static struct mouse_status {
-	char buttons;
-	char latch_buttons;
-	int dx;
-	int dy;
-	int present;
-	int ready;
-	int active;
-	struct wait_queue *wait;
-} mouse;
+static int msedev;
 
-void mouse_interrupt(int unused)
+static void mouse_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	char dx, dy, buttons;
 
@@ -74,125 +78,73 @@ void mouse_interrupt(int unused)
 	dy = inb( ATIXL_MSE_DATA_PORT);
 	outb(ATIXL_MSE_READ_BUTTONS, ATIXL_MSE_CONTROL_PORT); /* Select IR0 - Button Status */
 	buttons = inb( ATIXL_MSE_DATA_PORT);
-	if (dx != 0 || dy != 0 || buttons != mouse.latch_buttons) {
-		mouse.latch_buttons |= buttons;
-		mouse.dx += dx;
-		mouse.dy += dy;
-		mouse.ready = 1;
-		wake_up_interruptible(&mouse.wait);
-	}
+	busmouse_add_movementbuttons(msedev, dx, -dy, buttons);
 	ATIXL_MSE_ENABLE_UPDATE();
 }
 
-static void release_mouse(struct inode * inode, struct file * file)
+static int release_mouse(struct inode * inode, struct file * file)
 {
 	ATIXL_MSE_INT_OFF(); /* Interrupts are really shut down here */
-	mouse.active = 0;
-	mouse.ready = 0;
-	free_irq(ATIXL_MOUSE_IRQ);
+	free_irq(ATIXL_MOUSE_IRQ, NULL);
+	return 0;
 }
-
 
 static int open_mouse(struct inode * inode, struct file * file)
 {
-	if (!mouse.present)
-		return -EINVAL;
-	if (mouse.active)
+	if (request_irq(ATIXL_MOUSE_IRQ, mouse_interrupt, 0, "ATIXL mouse", NULL))
 		return -EBUSY;
-	mouse.active = 1;
-	mouse.ready = 0;
-	mouse.dx = 0;
-	mouse.dy = 0;
-	mouse.buttons = mouse.latch_buttons = 0;
-	if (request_irq(ATIXL_MOUSE_IRQ, mouse_interrupt)) {
-		mouse.active = 0;
-		return -EBUSY;
-	}
 	ATIXL_MSE_INT_ON(); /* Interrupts are really enabled here */
 	return 0;
 }
 
-
-static int write_mouse(struct inode * inode, struct file * file, char * buffer, int count)
-{
-	return -EINVAL;
-}
-
-static int read_mouse(struct inode * inode, struct file * file, char * buffer, int count)
-{
-	int i;
-
-	if (count < 3)
-		return -EINVAL;
-	if (!mouse.ready)
-		return -EAGAIN;
-	ATIXL_MSE_DISABLE_UPDATE();
-	/* Allowed interrupts to occur during data gathering - shouldn't hurt */
-	put_fs_byte((char)(~mouse.latch_buttons&7) | 0x80 , buffer);
-	if (mouse.dx < -127)
-		mouse.dx = -127;
-	if (mouse.dx > 127)
-		mouse.dx =  127;
-	put_fs_byte((char)mouse.dx, buffer + 1);
-	if (mouse.dy < -127)
-		mouse.dy = -127;
-	if (mouse.dy > 127)
-		mouse.dy =  127;
-	put_fs_byte((char)-mouse.dy, buffer + 2);
-	for(i = 3; i < count; i++)
-		put_fs_byte(0x00, buffer + i);
-	mouse.dx = 0;
-	mouse.dy = 0;
-	mouse.latch_buttons = mouse.buttons;
-	mouse.ready = 0;
-	ATIXL_MSE_ENABLE_UPDATE();
-	return i; /* i data bytes returned */
-}
-
-static int mouse_select(struct inode *inode, struct file *file, int sel_type, select_table * wait)
-{
-	if (sel_type != SEL_IN)
-		return 0;
-	if (mouse.ready)
-		return 1;
-	select_wait(&mouse.wait,wait);
-	return 0;
-}
-
-struct file_operations atixl_busmouse_fops = {
-	NULL,		/* mouse_seek */
-	read_mouse,
-	write_mouse,
-	NULL, 		/* mouse_readdir */
-	mouse_select, 	/* mouse_select */
-	NULL, 		/* mouse_ioctl */
-	NULL,		/* mouse_mmap */
-	open_mouse,
-	release_mouse,
+static struct busmouse atixlmouse = {
+	ATIXL_BUSMOUSE, "atixl", THIS_MODULE, open_mouse, release_mouse, 0
 };
 
-unsigned long atixl_busmouse_init(unsigned long kmem_start)
+static int __init atixl_busmouse_init(void)
 {
 	unsigned char a,b,c;
+
+	/*
+	 *	We must request the resource and claim it atomically
+	 *	nowdays. We can throw it away on error. Otherwise we
+	 *	may race another module load of the same I/O
+	 */
+
+	if (!request_region(ATIXL_MSE_DATA_PORT, 3, "atixlmouse"))
+		return -EIO;
 
 	a = inb( ATIXL_MSE_SIGNATURE_PORT );	/* Get signature */
 	b = inb( ATIXL_MSE_SIGNATURE_PORT );
 	c = inb( ATIXL_MSE_SIGNATURE_PORT );
 	if (( a != b ) && ( a == c ))
-		printk("\nATI Inport ");
-	else{
-		mouse.present = 0;
-		return kmem_start;
+		printk(KERN_INFO "\nATI Inport ");
+	else
+	{
+		release_region(ATIXL_MSE_DATA_PORT,3);
+		return -EIO;
 	}
 	outb(0x80, ATIXL_MSE_CONTROL_PORT);	/* Reset the Inport device */
 	outb(0x07, ATIXL_MSE_CONTROL_PORT);	/* Select Internal Register 7 */
 	outb(0x0a, ATIXL_MSE_DATA_PORT);	/* Data Interrupts 8+, 1=30hz, 2=50hz, 3=100hz, 4=200hz rate */
-	mouse.present = 1;
-	mouse.active = 0;
-	mouse.ready = 0;
-	mouse.buttons = mouse.latch_buttons = 0;
-	mouse.dx = mouse.dy = 0;
-	mouse.wait = NULL;
-	printk("Bus mouse detected and installed.\n");
-	return kmem_start;
+
+	msedev = register_busmouse(&atixlmouse);
+	if (msedev < 0)
+	{
+		printk("Bus mouse initialisation error.\n");
+		release_region(ATIXL_MSE_DATA_PORT,3);	/* Was missing */
+	}
+	else
+		printk("Bus mouse detected and installed.\n");
+	return msedev < 0 ? msedev : 0;
 }
+
+static void __exit atixl_cleanup (void)
+{
+	release_region(ATIXL_MSE_DATA_PORT, 3);
+	unregister_busmouse(msedev);
+}
+
+module_init(atixl_busmouse_init);
+module_exit(atixl_cleanup);
+

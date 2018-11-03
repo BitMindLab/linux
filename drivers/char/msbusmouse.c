@@ -22,26 +22,61 @@
  * Modified by Christoph Niemann (niemann@rubdv15.etdv.ruhr-uni-bochum.de)
  * Changes:  Better interrupt-handler (like in busmouse.c).
  *	     Some changes to reduce code-size.
- *	     Changed dectection code to use inb_p() instead of doing empty
+ *	     Changed detection code to use inb_p() instead of doing empty
  *	     loops to delay i/o.
  *
- * version 0.3a
+ * Modularised 8-Sep-95 Philip Blundell <pjb27@cam.ac.uk>
+ *
+ * Converted to use new generic busmouse code.  5 Apr 1998
+ *   Russell King <rmk@arm.uk.linux.org>
+ *
+ * version 0.3b
  */
 
+#include <linux/module.h>
+
 #include <linux/kernel.h>
+#include <linux/ioport.h>
 #include <linux/sched.h>
-#include <linux/busmouse.h>
+#include <linux/logibusmouse.h>
 #include <linux/signal.h>
 #include <linux/errno.h>
+#include <linux/miscdevice.h>
+#include <linux/random.h>
+#include <linux/poll.h>
+#include <linux/init.h>
 
 #include <asm/io.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/irq.h>
 
-static struct mouse_status mouse;
+#include "busmouse.h"
 
-static void ms_mouse_interrupt(int unused)
+static int msedev;
+static int mouse_irq = MOUSE_IRQ;
+
+MODULE_PARM(mouse_irq, "i");
+
+#ifndef MODULE
+
+static int __init msmouse_setup(char *str)
+{
+        int ints[4];
+
+        str = get_options(str, ARRAY_SIZE(ints), ints);
+
+	if (ints[0] > 0)
+		mouse_irq=ints[1];
+
+	return 1;
+}
+
+__setup("msmouse=",msmouse_setup);
+
+#endif /* !MODULE */
+
+static void ms_mouse_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
         char dx, dy;
 	unsigned char buttons;
@@ -61,97 +96,43 @@ static void ms_mouse_interrupt(int unused)
 	outb(MS_MSE_COMMAND_MODE, MS_MSE_CONTROL_PORT);
 	outb((inb(MS_MSE_DATA_PORT) & 0xdf), MS_MSE_DATA_PORT);
 
-	if (dx != 0 || dy != 0 || buttons != mouse.buttons || ((~buttons) & 0x07)) {
-		mouse.buttons = buttons;
-		mouse.dx += dx;
-		mouse.dy += dy;
-		mouse.ready = 1;
-		wake_up_interruptible(&mouse.wait);
-	}
+	/* why did the original have:
+	 * if (dx != 0 || dy != 0 || buttons != mouse.buttons ||
+	 *    ((~buttons) & 0x07))
+	 *    ^^^^^^^^^^^^^^^^^^^ this?
+	 */
+	busmouse_add_movementbuttons(msedev, dx, -dy, buttons);
 }
 
-static void release_mouse(struct inode * inode, struct file * file)
+static int release_mouse(struct inode * inode, struct file * file)
 {
 	MS_MSE_INT_OFF();
-	mouse.active = mouse.ready = 0; 
-	free_irq(MOUSE_IRQ);
+	free_irq(mouse_irq, NULL);
+	return 0;
 }
 
 static int open_mouse(struct inode * inode, struct file * file)
 {
-	if (!mouse.present)
-		return -EINVAL;
-	if (mouse.active)
+	if (request_irq(mouse_irq, ms_mouse_interrupt, 0, "MS Busmouse", NULL))
 		return -EBUSY;
-	mouse.active = 1;
-	mouse.ready = mouse.dx = mouse.dy = 0;	
-	mouse.buttons = 0x80;
-	if (request_irq(MOUSE_IRQ, ms_mouse_interrupt)) {
-		mouse.active = 0;
-		return -EBUSY;
-	}
+
 	outb(MS_MSE_START, MS_MSE_CONTROL_PORT);
 	MS_MSE_INT_ON();	
 	return 0;
 }
 
-
-static int write_mouse(struct inode * inode, struct file * file, char * buffer, int count)
-{
-	return -EINVAL;
-}
-
-static int read_mouse(struct inode * inode, struct file * file, char * buffer, int count)
-{
-	int i, dx, dy;
-
-	if (count < 3)
-		return -EINVAL;
-	if (!mouse.ready)
-		return -EAGAIN;
-	put_fs_byte(mouse.buttons | 0x80, buffer);
-	dx = mouse.dx < -127 ? -127 : mouse.dx > 127 ?  127 :  mouse.dx;
-	dy = mouse.dy < -127 ?  127 : mouse.dy > 127 ? -127 : -mouse.dy;
-	put_fs_byte((char)dx, buffer + 1);
-	put_fs_byte((char)dy, buffer + 2);
-	for (i = 3; i < count; i++)
-		put_fs_byte(0x00, buffer + i);
-	mouse.dx -= dx;
-	mouse.dy += dy;
-	mouse.ready = 0;
-	return i;	
-}
-
-static int mouse_select(struct inode *inode, struct file *file, int sel_type, select_table * wait)
-{
-	if (sel_type != SEL_IN)
-		return 0;
-	if (mouse.ready) 
-		return 1;
-	select_wait(&mouse.wait,wait);
-	return 0;
-}
-
-struct file_operations ms_bus_mouse_fops = {
-	NULL,		/* mouse_seek */
-	read_mouse,
-	write_mouse,
-	NULL, 		/* mouse_readdir */
-	mouse_select, 	/* mouse_select */
-	NULL, 		/* mouse_ioctl */
-	NULL,		/* mouse_mmap */
-	open_mouse,
-	release_mouse,
+static struct busmouse msbusmouse = {
+	MICROSOFT_BUSMOUSE, "msbusmouse", THIS_MODULE, open_mouse, release_mouse, 0
 };
 
-unsigned long ms_bus_mouse_init(unsigned long kmem_start)
+static int __init ms_bus_mouse_init(void)
 {
+	int present = 0;
 	int mse_byte, i;
 
-	mouse.present = mouse.active = mouse.ready = 0;
-	mouse.buttons = 0x80;
-	mouse.dx = mouse.dy = 0;
-	mouse.wait = NULL;
+	if (check_region(MS_MSE_CONTROL_PORT, 0x04))
+		return -ENODEV;
+
 	if (inb_p(MS_MSE_SIGNATURE_PORT) == 0xde) {
 
 		mse_byte = inb_p(MS_MSE_SIGNATURE_PORT);
@@ -159,17 +140,30 @@ unsigned long ms_bus_mouse_init(unsigned long kmem_start)
 		for (i = 0; i < 4; i++) {
 			if (inb_p(MS_MSE_SIGNATURE_PORT) == 0xde) {
 				if (inb_p(MS_MSE_SIGNATURE_PORT) == mse_byte)
-					mouse.present = 1;
+					present = 1;
 				else
-					mouse.present = 0;
+					present = 0;
 			} else
-				mouse.present = 0;
+				present = 0;
 		}
 	}
-	if (mouse.present == 0) {
-		return kmem_start;
-	}
+	if (present == 0)
+		return -EIO;
 	MS_MSE_INT_OFF();
-	printk("Microsoft BusMouse detected and installed.\n");
-	return kmem_start;
+	request_region(MS_MSE_CONTROL_PORT, 0x04, "MS Busmouse");
+	msedev = register_busmouse(&msbusmouse);
+	if (msedev < 0)
+		printk(KERN_WARNING "Unable to register msbusmouse driver.\n");
+	else
+		printk(KERN_INFO "Microsoft BusMouse detected and installed.\n");
+	return msedev < 0 ? msedev : 0;
 }
+
+static void __exit ms_bus_mouse_exit(void)
+{
+	unregister_busmouse(msedev);
+	release_region(MS_MSE_CONTROL_PORT, 0x04);
+}
+
+module_init(ms_bus_mouse_init)
+module_exit(ms_bus_mouse_exit)

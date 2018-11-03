@@ -1,49 +1,47 @@
 #
-# Makefile for the linux kernel device drivers.
+# Makefile for the Linux kernel device drivers.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
+# 15 Sep 2000, Christoph Hellwig <hch@caldera.de>
+# Rewritten to use lists instead of if-statements.
 #
-# Note 2! The CFLAGS definitions are now in the main makefile...
 
-.S.s:
-	$(CPP) -traditional $< -o $*.s
-.c.s:
-	$(CC) $(CFLAGS) -S $<
-.s.o:
-	$(AS) -c -o $*.o $<
-.c.o:
-	$(CC) $(CFLAGS) -c $<
 
-SUBDIRS	= block char net
+mod-subdirs :=	dio mtd sbus video macintosh usb input telephony sgi i2o ide \
+		scsi md ieee1394 pnp isdn atm fc4 net/hamradio i2c acpi
 
-ifdef CONFIG_MATH_EMULATION
-SUBDIRS := $(SUBDIRS) FPU-emu
-endif
+subdir-y :=	block char net parport sound misc media cdrom
+subdir-m :=	$(subdir-y)
 
-ifdef CONFIG_SCSI
-SUBDIRS := $(SUBDIRS) scsi
-endif
 
-ifdef CONFIG_SOUND
-SUBDIRS := $(SUBDIRS) sound
-endif
+subdir-$(CONFIG_DIO)		+= dio
+subdir-$(CONFIG_PCI)		+= pci
+subdir-$(CONFIG_PCMCIA)		+= pcmcia
+subdir-$(CONFIG_MTD)		+= mtd
+subdir-$(CONFIG_SBUS)		+= sbus
+subdir-$(CONFIG_ZORRO)		+= zorro
+subdir-$(CONFIG_NUBUS)		+= nubus
+subdir-$(CONFIG_TC)		+= tc
+subdir-$(CONFIG_VT)		+= video
+subdir-$(CONFIG_MAC)		+= macintosh
+subdir-$(CONFIG_ALL_PPC)	+= macintosh
+subdir-$(CONFIG_USB)		+= usb
+subdir-$(CONFIG_INPUT)		+= input
+subdir-$(CONFIG_PHONE)		+= telephony
+subdir-$(CONFIG_SGI)		+= sgi
+subdir-$(CONFIG_IDE)		+= ide
+subdir-$(CONFIG_SCSI)		+= scsi
+subdir-$(CONFIG_I2O)		+= i2o
+subdir-$(CONFIG_MD)		+= md
+subdir-$(CONFIG_IEEE1394)	+= ieee1394
+subdir-$(CONFIG_PNP)		+= pnp
+subdir-$(CONFIG_ISDN)		+= isdn
+subdir-$(CONFIG_ATM)		+= atm
+subdir-$(CONFIG_FC4)		+= fc4
 
-all: driversubdirs
+# CONFIG_HAMRADIO can be set without CONFIG_NETDEVICE being set  -- ch
+subdir-$(CONFIG_HAMRADIO)	+= net/hamradio
+subdir-$(CONFIG_I2C)		+= i2c
+subdir-$(CONFIG_ACPI)		+= acpi
 
-driversubdirs: dummy
-	set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i; done
-
-dep:
-	set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i dep; done
-
-dummy:
-
-#
-# include a dependency file if one exists
-#
-ifeq (.depend,$(wildcard .depend))
-include .depend
-endif
+include $(TOPDIR)/Rules.make
 

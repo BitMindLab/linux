@@ -4,870 +4,398 @@
  *  Copyright (C) 1992, 1993, 1994  Rick Sladkey
  *
  *  OS-independent nfs remote procedure call functions
+ *
+ *  Tuned by Alan Cox <A.Cox@swansea.ac.uk> for >3K buffers
+ *  so at last we can have decent(ish) throughput off a 
+ *  Sun server.
+ *
+ *  Coding optimized and cleaned up by Florian La Roche.
+ *  Note: Error returns are optimized for NFS_OK, which isn't translated via
+ *  nfs_stat_to_errno(), but happens to be already the right return code.
+ *
+ *  Also, the code currently doesn't check the size of the packet, when
+ *  it decodes the packet.
+ *
+ *  Feel free to fix it and mail me the diffs if it worries you.
+ *
+ *  Completely rewritten to support the new RPC call interface;
+ *  rewrote and moved the entire XDR stuff to xdr.c
+ *  --Olaf Kirch June 1996
+ *
+ *  The code below initializes all auto variables explicitly, otherwise
+ *  it will fail to work as a module (gcc generates a memset call for an
+ *  incomplete struct).
  */
 
-/*
- * Defining NFS_PROC_DEBUG causes a lookup of a file named
- * "xyzzy" to toggle debugging.  Just cd to an NFS-mounted
- * filesystem and type 'ls xyzzy' to turn on debugging.
- */
-
-#if 0
-#define NFS_PROC_DEBUG
-#endif
-
-#include <linux/config.h>
+#include <linux/types.h>
 #include <linux/param.h>
+#include <linux/malloc.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
-#include <linux/nfs_fs.h>
 #include <linux/utsname.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/in.h>
+#include <linux/pagemap.h>
+#include <linux/sunrpc/clnt.h>
+#include <linux/nfs.h>
+#include <linux/nfs2.h>
+#include <linux/nfs_fs.h>
 
-#ifdef NFS_PROC_DEBUG
-
-static int proc_debug = 0;
-#define PRINTK(format, args...) \
-	do {						\
-		if (proc_debug)				\
-			printk(format , ## args);	\
-	} while (0)
-
-#else /* !NFS_PROC_DEBUG */
-
-#define PRINTK(format, args...) do ; while (0)
-
-#endif /* !NFS_PROC_DEBUG */
-
-static int *nfs_rpc_header(int *p, int procedure, int ruid);
-static int *nfs_rpc_verify(int *p);
-static int nfs_stat_to_errno(int stat);
+#define NFSDBG_FACILITY		NFSDBG_PROC
 
 /*
- * Our memory allocation and release functions.
+ * Bare-bones access to getattr: this is for nfs_read_super.
  */
-
-static inline int *nfs_rpc_alloc(void)
+static int
+nfs_proc_get_root(struct nfs_server *server, struct nfs_fh *fhandle,
+		  struct nfs_fattr *fattr)
 {
-	return (int *) __get_free_page(GFP_KERNEL);
-}
+	int		status;
 
-static inline void nfs_rpc_free(int *p)
-{
-	free_page((long) p);
-}
-
-/*
- * Here are a bunch of xdr encode/decode functions that convert
- * between machine dependent and xdr data formats.
- */
-
-static inline int *xdr_encode_fhandle(int *p, struct nfs_fh *fhandle)
-{
-	*((struct nfs_fh *) p) = *fhandle;
-	p += (sizeof (*fhandle) + 3) >> 2;
-	return p;
-}
-
-static inline int *xdr_decode_fhandle(int *p, struct nfs_fh *fhandle)
-{
-	*fhandle = *((struct nfs_fh *) p);
-	p += (sizeof (*fhandle) + 3) >> 2;
-	return p;
-}
-
-static inline int *xdr_encode_string(int *p, const char *string)
-{
-	int len, quadlen;
-	
-	len = strlen(string);
-	quadlen = (len + 3) >> 2;
-	*p++ = htonl(len);
-	memcpy((char *) p, string, len);
-	memset(((char *) p) + len, '\0', (quadlen << 2) - len);
-	p += quadlen;
-	return p;
-}
-
-static inline int *xdr_decode_string(int *p, char *string, int maxlen)
-{
-	unsigned int len;
-
-	len = ntohl(*p++);
-	if (len > maxlen)
-		return NULL;
-	memcpy(string, (char *) p, len);
-	string[len] = '\0';
-	p += (len + 3) >> 2;
-	return p;
-}
-
-static inline int *xdr_encode_data(int *p, char *data, int len)
-{
-	int quadlen;
-	
-	quadlen = (len + 3) >> 2;
-	*p++ = htonl(len);
-	memcpy((char *) p, data, len);
-	memset(((char *) p) + len, '\0', (quadlen << 2) - len);
-	p += quadlen;
-	return p;
-}
-
-static inline int *xdr_decode_data(int *p, char *data, int *lenp, int maxlen)
-{
-	unsigned int len;
-
-	len = *lenp = ntohl(*p++);
-	if (len > maxlen)
-		return NULL;
-	memcpy(data, (char *) p, len);
-	p += (len + 3) >> 2;
-	return p;
-}
-
-static int *xdr_decode_fattr(int *p, struct nfs_fattr *fattr)
-{
-	fattr->type = (enum nfs_ftype) ntohl(*p++);
-	fattr->mode = ntohl(*p++);
-	fattr->nlink = ntohl(*p++);
-	fattr->uid = ntohl(*p++);
-	fattr->gid = ntohl(*p++);
-	fattr->size = ntohl(*p++);
-	fattr->blocksize = ntohl(*p++);
-	fattr->rdev = ntohl(*p++);
-	fattr->blocks = ntohl(*p++);
-	fattr->fsid = ntohl(*p++);
-	fattr->fileid = ntohl(*p++);
-	fattr->atime.seconds = ntohl(*p++);
-	fattr->atime.useconds = ntohl(*p++);
-	fattr->mtime.seconds = ntohl(*p++);
-	fattr->mtime.useconds = ntohl(*p++);
-	fattr->ctime.seconds = ntohl(*p++);
-	fattr->ctime.useconds = ntohl(*p++);
-	return p;
-}
-
-static int *xdr_encode_sattr(int *p, struct nfs_sattr *sattr)
-{
-	*p++ = htonl(sattr->mode);
-	*p++ = htonl(sattr->uid);
-	*p++ = htonl(sattr->gid);
-	*p++ = htonl(sattr->size);
-	*p++ = htonl(sattr->atime.seconds);
-	*p++ = htonl(sattr->atime.useconds);
-	*p++ = htonl(sattr->mtime.seconds);
-	*p++ = htonl(sattr->mtime.useconds);
-	return p;
-}
-
-static int *xdr_decode_entry(int *p, struct nfs_entry *entry)
-{
-	entry->fileid = ntohl(*p++);
-	if (!(p = xdr_decode_string(p, entry->name, NFS_MAXNAMLEN)))
-		return NULL;
-	entry->cookie = ntohl(*p++);
-	entry->eof = 0;
-	return p;
-}
-
-static int *xdr_decode_fsinfo(int *p, struct nfs_fsinfo *res)
-{
-	res->tsize = ntohl(*p++);
-	res->bsize = ntohl(*p++);
-	res->blocks = ntohl(*p++);
-	res->bfree = ntohl(*p++);
-	res->bavail = ntohl(*p++);
-	return p;
+	dprintk("NFS call  getroot\n");
+	fattr->valid = 0;
+	status = rpc_call(server->client, NFSPROC_GETATTR, fhandle, fattr, 0);
+	dprintk("NFS reply getroot\n");
+	return status;
 }
 
 /*
  * One function for each procedure in the NFS protocol.
  */
-
-int nfs_proc_getattr(struct nfs_server *server, struct nfs_fh *fhandle,
-		     struct nfs_fattr *fattr)
+static int
+nfs_proc_getattr(struct inode *inode, struct nfs_fattr *fattr)
 {
-	int *p, *p0;
-	int status;
-	int ruid = 0;
+	int	status;
 
-	PRINTK("NFS call  getattr\n");
-	if (!(p0 = nfs_rpc_alloc()))
-		return -EIO;
-retry:
-	p = nfs_rpc_header(p0, NFSPROC_GETATTR, ruid);
-	p = xdr_encode_fhandle(p, fhandle);
-	if ((status = nfs_rpc_call(server, p0, p)) < 0) {
-		nfs_rpc_free(p0);
-		return status;
-	}
-	if (!(p = nfs_rpc_verify(p0)))
-		status = NFSERR_IO;
-	else if ((status = ntohl(*p++)) == NFS_OK) {
-		p = xdr_decode_fattr(p, fattr);
-		PRINTK("NFS reply getattr\n");
-	}
-	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
-			ruid = 1;
-			goto retry;
-		}
-		PRINTK("NFS reply getattr failed = %d\n", status);
-	}
-	nfs_rpc_free(p0);
-	return -nfs_stat_to_errno(status);
+	dprintk("NFS call  getattr\n");
+	fattr->valid = 0;
+	status = rpc_call(NFS_CLIENT(inode), NFSPROC_GETATTR,
+				NFS_FH(inode), fattr, 0);
+	dprintk("NFS reply getattr\n");
+	return status;
 }
 
-int nfs_proc_setattr(struct nfs_server *server, struct nfs_fh *fhandle,
-		     struct nfs_sattr *sattr, struct nfs_fattr *fattr)
+static int
+nfs_proc_setattr(struct inode *inode, struct nfs_fattr *fattr,
+		 struct iattr *sattr)
 {
-	int *p, *p0;
-	int status;
-	int ruid = 0;
+	struct nfs_sattrargs	arg = { NFS_FH(inode), sattr };
+	int	status;
 
-	PRINTK("NFS call  setattr\n");
-	if (!(p0 = nfs_rpc_alloc()))
-		return -EIO;
-retry:
-	p = nfs_rpc_header(p0, NFSPROC_SETATTR, ruid);
-	p = xdr_encode_fhandle(p, fhandle);
-	p = xdr_encode_sattr(p, sattr);
-	if ((status = nfs_rpc_call(server, p0, p)) < 0) {
-		nfs_rpc_free(p0);
-		return status;
-	}
-	if (!(p = nfs_rpc_verify(p0)))
-		status = NFSERR_IO;
-	else if ((status = ntohl(*p++)) == NFS_OK) {
-		p = xdr_decode_fattr(p, fattr);
-		PRINTK("NFS reply setattr\n");
-	}
-	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
-			ruid = 1;
-			goto retry;
-		}
-		PRINTK("NFS reply setattr failed = %d\n", status);
-	}
-	nfs_rpc_free(p0);
-	return -nfs_stat_to_errno(status);
+	dprintk("NFS call  setattr\n");
+	fattr->valid = 0;
+	status = rpc_call(NFS_CLIENT(inode), NFSPROC_SETATTR, &arg, fattr, 0);
+	dprintk("NFS reply setattr\n");
+	return status;
 }
 
-int nfs_proc_lookup(struct nfs_server *server, struct nfs_fh *dir, const char *name,
-		    struct nfs_fh *fhandle, struct nfs_fattr *fattr)
+static int
+nfs_proc_lookup(struct inode *dir, struct qstr *name,
+		struct nfs_fh *fhandle, struct nfs_fattr *fattr)
 {
-	int *p, *p0;
-	int status;
-	int ruid = 0;
+	struct nfs_diropargs	arg = { NFS_FH(dir), name->name, name->len };
+	struct nfs_diropok	res = { fhandle, fattr };
+	int			status;
 
-	PRINTK("NFS call  lookup %s\n", name);
-#ifdef NFS_PROC_DEBUG
-	if (!strcmp(name, "xyzzy"))
-		proc_debug = 1 - proc_debug;
-#endif
-	if (!(p0 = nfs_rpc_alloc()))
-		return -EIO;
-retry:
-	p = nfs_rpc_header(p0, NFSPROC_LOOKUP, ruid);
-	p = xdr_encode_fhandle(p, dir);
-	p = xdr_encode_string(p, name);
-	if ((status = nfs_rpc_call(server, p0, p)) < 0) {
-		nfs_rpc_free(p0);
-		return status;
-	}
-	if (!(p = nfs_rpc_verify(p0)))
-		status = NFSERR_IO;
-	else if ((status = ntohl(*p++)) == NFS_OK) {
-		p = xdr_decode_fhandle(p, fhandle);
-		p = xdr_decode_fattr(p, fattr);
-		PRINTK("NFS reply lookup\n");
-	}
-	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
-			ruid = 1;
-			goto retry;
-		}
-		PRINTK("NFS reply lookup failed = %d\n", status);
-	}
-	nfs_rpc_free(p0);
-	return -nfs_stat_to_errno(status);
+	dprintk("NFS call  lookup %s\n", name->name);
+	fattr->valid = 0;
+	status = rpc_call(NFS_CLIENT(dir), NFSPROC_LOOKUP, &arg, &res, 0);
+	dprintk("NFS reply lookup: %d\n", status);
+	return status;
 }
 
-int nfs_proc_readlink(struct nfs_server *server, struct nfs_fh *fhandle,
-		      char *res)
+static int
+nfs_proc_readlink(struct inode *inode, void *buffer, unsigned int bufsiz)
 {
-	int *p, *p0;
-	int status;
-	int ruid = 0;
+	struct nfs_readlinkargs	args = { NFS_FH(inode), buffer, bufsiz };
+	struct nfs_readlinkres	res = { buffer, bufsiz };
+	int			status;
 
-	PRINTK("NFS call  readlink\n");
-	if (!(p0 = nfs_rpc_alloc()))
-		return -EIO;
-retry:
-	p = nfs_rpc_header(p0, NFSPROC_READLINK, ruid);
-	p = xdr_encode_fhandle(p, fhandle);
-	if ((status = nfs_rpc_call(server, p0, p)) < 0) {
-		nfs_rpc_free(p0);
-		return status;
-	}
-	if (!(p = nfs_rpc_verify(p0)))
-		status = NFSERR_IO;
-	else if ((status = ntohl(*p++)) == NFS_OK) {
-		if (!(p = xdr_decode_string(p, res, NFS_MAXPATHLEN))) {
-			printk("nfs_proc_readlink: giant pathname\n");
-			status = NFSERR_IO;
-		}
-		else
-			PRINTK("NFS reply readlink %s\n", res);
-	}
-	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
-			ruid = 1;
-			goto retry;
-		}
-		PRINTK("NFS reply readlink failed = %d\n", status);
-	}
-	nfs_rpc_free(p0);
-	return -nfs_stat_to_errno(status);
+	dprintk("NFS call  readlink\n");
+	status = rpc_call(NFS_CLIENT(inode), NFSPROC_READLINK,
+					&args, &res, 0);
+	dprintk("NFS reply readlink: %d\n", status);
+	return status;
 }
 
-int nfs_proc_read(struct nfs_server *server, struct nfs_fh *fhandle,
-		  int offset, int count, char *data, struct nfs_fattr *fattr)
+static int
+nfs_proc_read(struct inode *inode, struct rpc_cred *cred,
+	      struct nfs_fattr *fattr, int flags,
+	      loff_t offset, unsigned int count, void *buffer, int *eofp)
 {
-	int *p, *p0;
-	int status;
-	int ruid = 0;
-	int len = 0; /* = 0 is for gcc */
+	struct nfs_readargs	arg = { NFS_FH(inode), offset, count, 1,
+				       {{ buffer, count }, {0,0}, {0,0}, {0,0},
+					{0,0}, {0,0}, {0,0}, {0,0}} };
+	struct nfs_readres	res = { fattr, count, 0};
+	struct rpc_message	msg = { NFSPROC_READ, &arg, &res, cred };
+	int			status;
 
-	PRINTK("NFS call  read %d @ %d\n", count, offset);
-	if (!(p0 = nfs_rpc_alloc()))
-		return -EIO;
-retry:
-	p = nfs_rpc_header(p0, NFSPROC_READ, ruid);
-	p = xdr_encode_fhandle(p, fhandle);
-	*p++ = htonl(offset);
-	*p++ = htonl(count);
-	*p++ = htonl(count); /* traditional, could be any value */
-	if ((status = nfs_rpc_call(server, p0, p)) < 0) {
-		nfs_rpc_free(p0);
-		return status;
-	}
-	if (!(p = nfs_rpc_verify(p0)))
-		status = NFSERR_IO;
-	else if ((status = ntohl(*p++)) == NFS_OK) {
-		p = xdr_decode_fattr(p, fattr);
-		if (!(p = xdr_decode_data(p, data, &len, count))) {
-			printk("nfs_proc_read: giant data size\n"); 
-			status = NFSERR_IO;
-		}
-		else
-			PRINTK("NFS reply read %d\n", len);
-	}
-	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
-			ruid = 1;
-			goto retry;
-		}
-		PRINTK("NFS reply read failed = %d\n", status);
-	}
-	nfs_rpc_free(p0);
-	return (status == NFS_OK) ? len : -nfs_stat_to_errno(status);
+	dprintk("NFS call  read %d @ %Ld\n", count, (long long)offset);
+	fattr->valid = 0;
+	status = rpc_call_sync(NFS_CLIENT(inode), &msg, flags);
+
+	dprintk("NFS reply read: %d\n", status);
+	*eofp = res.eof;
+	return status;
 }
 
-int nfs_proc_write(struct nfs_server *server, struct nfs_fh *fhandle,
-		   int offset, int count, char *data, struct nfs_fattr *fattr)
+static int
+nfs_proc_write(struct inode *inode, struct rpc_cred *cred,
+	       struct nfs_fattr *fattr, int how,
+	       loff_t offset, unsigned int count,
+	       void *buffer, struct nfs_writeverf *verf)
 {
-	int *p, *p0;
-	int status;
-	int ruid = 0;
+	struct nfs_writeargs	arg = {NFS_FH(inode), offset, count,
+					NFS_FILE_SYNC, 1,
+					{{buffer, count}, {0,0}, {0,0}, {0,0},
+					 {0,0}, {0,0}, {0,0}, {0,0}}};
+	struct nfs_writeres     res = {fattr, verf, count};
+	struct rpc_message	msg = { NFSPROC_WRITE, &arg, &res, cred };
+	int			status, flags = 0;
 
-	PRINTK("NFS call  write %d @ %d\n", count, offset);
-	if (!(p0 = nfs_rpc_alloc()))
-		return -EIO;
-retry:
-	p = nfs_rpc_header(p0, NFSPROC_WRITE, ruid);
-	p = xdr_encode_fhandle(p, fhandle);
-	*p++ = htonl(offset); /* traditional, could be any value */
-	*p++ = htonl(offset);
-	*p++ = htonl(count); /* traditional, could be any value */
-	p = xdr_encode_data(p, data, count);
-	if ((status = nfs_rpc_call(server, p0, p)) < 0) {
-		nfs_rpc_free(p0);
-		return status;
-	}
-	if (!(p = nfs_rpc_verify(p0)))
-		status = NFSERR_IO;
-	else if ((status = ntohl(*p++)) == NFS_OK) {
-		p = xdr_decode_fattr(p, fattr);
-		PRINTK("NFS reply write\n");
-	}
-	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
-			ruid = 1;
-			goto retry;
-		}
-		PRINTK("NFS reply write failed = %d\n", status);
-	}
-	nfs_rpc_free(p0);
-	return -nfs_stat_to_errno(status);
+	dprintk("NFS call  write %d @ %Ld\n", count, (long long)offset);
+	fattr->valid = 0;
+	if (how & NFS_RW_SWAP)
+		flags |= NFS_RPC_SWAPFLAGS;
+	status = rpc_call_sync(NFS_CLIENT(inode), &msg, flags);
+
+	dprintk("NFS reply write: %d\n", status);
+	verf->committed = NFS_FILE_SYNC;      /* NFSv2 always syncs data */
+	return status < 0? status : count;
 }
 
-int nfs_proc_create(struct nfs_server *server, struct nfs_fh *dir,
-		    const char *name, struct nfs_sattr *sattr,
-		    struct nfs_fh *fhandle, struct nfs_fattr *fattr)
+static int
+nfs_proc_create(struct inode *dir, struct qstr *name, struct iattr *sattr,
+		int flags, struct nfs_fh *fhandle, struct nfs_fattr *fattr)
 {
-	int *p, *p0;
-	int status;
-	int ruid = 0;
+	struct nfs_createargs	arg = { NFS_FH(dir), name->name,
+					name->len, sattr };
+	struct nfs_diropok	res = { fhandle, fattr };
+	int			status;
 
-	PRINTK("NFS call  create %s\n", name);
-	if (!(p0 = nfs_rpc_alloc()))
-		return -EIO;
-retry:
-	p = nfs_rpc_header(p0, NFSPROC_CREATE, ruid);
-	p = xdr_encode_fhandle(p, dir);
-	p = xdr_encode_string(p, name);
-	p = xdr_encode_sattr(p, sattr);
-	if ((status = nfs_rpc_call(server, p0, p)) < 0) {
-		nfs_rpc_free(p0);
-		return status;
-	}
-	if (!(p = nfs_rpc_verify(p0)))
-		status = NFSERR_IO;
-	else if ((status = ntohl(*p++)) == NFS_OK) {
-		p = xdr_decode_fhandle(p, fhandle);
-		p = xdr_decode_fattr(p, fattr);
-		PRINTK("NFS reply create\n");
-	}
-	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
-			ruid = 1;
-			goto retry;
-		}
-		PRINTK("NFS reply create failed = %d\n", status);
-	}
-	nfs_rpc_free(p0);
-	return -nfs_stat_to_errno(status);
-}
-
-int nfs_proc_remove(struct nfs_server *server, struct nfs_fh *dir, const char *name)
-{
-	int *p, *p0;
-	int status;
-	int ruid = 0;
-
-	PRINTK("NFS call  remove %s\n", name);
-	if (!(p0 = nfs_rpc_alloc()))
-		return -EIO;
-retry:
-	p = nfs_rpc_header(p0, NFSPROC_REMOVE, ruid);
-	p = xdr_encode_fhandle(p, dir);
-	p = xdr_encode_string(p, name);
-	if ((status = nfs_rpc_call(server, p0, p)) < 0) {
-		nfs_rpc_free(p0);
-		return status;
-	}
-	if (!(p = nfs_rpc_verify(p0)))
-		status = NFSERR_IO;
-	else if ((status = ntohl(*p++)) == NFS_OK) {
-		PRINTK("NFS reply remove\n");
-	}
-	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
-			ruid = 1;
-			goto retry;
-		}
-		PRINTK("NFS reply remove failed = %d\n", status);
-	}
-	nfs_rpc_free(p0);
-	return -nfs_stat_to_errno(status);
-}
-
-int nfs_proc_rename(struct nfs_server *server,
-		    struct nfs_fh *old_dir, const char *old_name,
-		    struct nfs_fh *new_dir, const char *new_name)
-{
-	int *p, *p0;
-	int status;
-	int ruid = 0;
-
-	PRINTK("NFS call  rename %s -> %s\n", old_name, new_name);
-	if (!(p0 = nfs_rpc_alloc()))
-		return -EIO;
-retry:
-	p = nfs_rpc_header(p0, NFSPROC_RENAME, ruid);
-	p = xdr_encode_fhandle(p, old_dir);
-	p = xdr_encode_string(p, old_name);
-	p = xdr_encode_fhandle(p, new_dir);
-	p = xdr_encode_string(p, new_name);
-	if ((status = nfs_rpc_call(server, p0, p)) < 0) {
-		nfs_rpc_free(p0);
-		return status;
-	}
-	if (!(p = nfs_rpc_verify(p0)))
-		status = NFSERR_IO;
-	else if ((status = ntohl(*p++)) == NFS_OK) {
-		PRINTK("NFS reply rename\n");
-	}
-	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
-			ruid = 1;
-			goto retry;
-		}
-		PRINTK("NFS reply rename failed = %d\n", status);
-	}
-	nfs_rpc_free(p0);
-	return -nfs_stat_to_errno(status);
-}
-
-int nfs_proc_link(struct nfs_server *server, struct nfs_fh *fhandle,
-		  struct nfs_fh *dir, const char *name)
-{
-	int *p, *p0;
-	int status;
-	int ruid = 0;
-
-	PRINTK("NFS call  link %s\n", name);
-	if (!(p0 = nfs_rpc_alloc()))
-		return -EIO;
-retry:
-	p = nfs_rpc_header(p0, NFSPROC_LINK, ruid);
-	p = xdr_encode_fhandle(p, fhandle);
-	p = xdr_encode_fhandle(p, dir);
-	p = xdr_encode_string(p, name);
-	if ((status = nfs_rpc_call(server, p0, p)) < 0) {
-		nfs_rpc_free(p0);
-		return status;
-	}
-	if (!(p = nfs_rpc_verify(p0)))
-		status = NFSERR_IO;
-	else if ((status = ntohl(*p++)) == NFS_OK) {
-		PRINTK("NFS reply link\n");
-	}
-	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
-			ruid = 1;
-			goto retry;
-		}
-		PRINTK("NFS reply link failed = %d\n", status);
-	}
-	nfs_rpc_free(p0);
-	return -nfs_stat_to_errno(status);
-}
-
-int nfs_proc_symlink(struct nfs_server *server, struct nfs_fh *dir,
-		     const char *name, const char *path, struct nfs_sattr *sattr)
-{
-	int *p, *p0;
-	int status;
-	int ruid = 0;
-
-	PRINTK("NFS call  symlink %s -> %s\n", name, path);
-	if (!(p0 = nfs_rpc_alloc()))
-		return -EIO;
-retry:
-	p = nfs_rpc_header(p0, NFSPROC_SYMLINK, ruid);
-	p = xdr_encode_fhandle(p, dir);
-	p = xdr_encode_string(p, name);
-	p = xdr_encode_string(p, path);
-	p = xdr_encode_sattr(p, sattr);
-	if ((status = nfs_rpc_call(server, p0, p)) < 0) {
-		nfs_rpc_free(p0);
-		return status;
-	}
-	if (!(p = nfs_rpc_verify(p0)))
-		status = NFSERR_IO;
-	else if ((status = ntohl(*p++)) == NFS_OK) {
-		PRINTK("NFS reply symlink\n");
-	}
-	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
-			ruid = 1;
-			goto retry;
-		}
-		PRINTK("NFS reply symlink failed = %d\n", status);
-	}
-	nfs_rpc_free(p0);
-	return -nfs_stat_to_errno(status);
-}
-
-int nfs_proc_mkdir(struct nfs_server *server, struct nfs_fh *dir,
-		   const char *name, struct nfs_sattr *sattr,
-		   struct nfs_fh *fhandle, struct nfs_fattr *fattr)
-{
-	int *p, *p0;
-	int status;
-	int ruid = 0;
-
-	PRINTK("NFS call  mkdir %s\n", name);
-	if (!(p0 = nfs_rpc_alloc()))
-		return -EIO;
-retry:
-	p = nfs_rpc_header(p0, NFSPROC_MKDIR, ruid);
-	p = xdr_encode_fhandle(p, dir);
-	p = xdr_encode_string(p, name);
-	p = xdr_encode_sattr(p, sattr);
-	if ((status = nfs_rpc_call(server, p0, p)) < 0) {
-		nfs_rpc_free(p0);
-		return status;
-	}
-	if (!(p = nfs_rpc_verify(p0)))
-		status = NFSERR_IO;
-	else if ((status = ntohl(*p++)) == NFS_OK) {
-		p = xdr_decode_fhandle(p, fhandle);
-		p = xdr_decode_fattr(p, fattr);
-		PRINTK("NFS reply mkdir\n");
-	}
-	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
-			ruid = 1;
-			goto retry;
-		}
-		PRINTK("NFS reply mkdir failed = %d\n", status);
-	}
-	nfs_rpc_free(p0);
-	return -nfs_stat_to_errno(status);
-}
-
-int nfs_proc_rmdir(struct nfs_server *server, struct nfs_fh *dir, const char *name)
-{
-	int *p, *p0;
-	int status;
-	int ruid = 0;
-
-	PRINTK("NFS call  rmdir %s\n", name);
-	if (!(p0 = nfs_rpc_alloc()))
-		return -EIO;
-retry:
-	p = nfs_rpc_header(p0, NFSPROC_RMDIR, ruid);
-	p = xdr_encode_fhandle(p, dir);
-	p = xdr_encode_string(p, name);
-	if ((status = nfs_rpc_call(server, p0, p)) < 0) {
-		nfs_rpc_free(p0);
-		return status;
-	}
-	if (!(p = nfs_rpc_verify(p0)))
-		status = NFSERR_IO;
-	else if ((status = ntohl(*p++)) == NFS_OK) {
-		PRINTK("NFS reply rmdir\n");
-	}
-	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
-			ruid = 1;
-			goto retry;
-		}
-		PRINTK("NFS reply rmdir failed = %d\n", status);
-	}
-	nfs_rpc_free(p0);
-	return -nfs_stat_to_errno(status);
-}
-
-int nfs_proc_readdir(struct nfs_server *server, struct nfs_fh *fhandle,
-		     int cookie, int count, struct nfs_entry *entry)
-{
-	int *p, *p0;
-	int status;
-	int ruid = 0;
-	int i = 0; /* = 0 is for gcc */
-	int size;
-	int eof;
-
-	PRINTK("NFS call  readdir %d @ %d\n", count, cookie);
-	size = server->rsize;
-	if (!(p0 = nfs_rpc_alloc()))
-		return -EIO;
-retry:
-	p = nfs_rpc_header(p0, NFSPROC_READDIR, ruid);
-	p = xdr_encode_fhandle(p, fhandle);
-	*p++ = htonl(cookie);
-	*p++ = htonl(size);
-	if ((status = nfs_rpc_call(server, p0, p)) < 0) {
-		nfs_rpc_free(p0);
-		return status;
-	}
-	if (!(p = nfs_rpc_verify(p0)))
-		status = NFSERR_IO;
-	else if ((status = ntohl(*p++)) == NFS_OK) {
-		for (i = 0; i < count && *p++; i++) {
-			if (!(p = xdr_decode_entry(p, entry++)))
-				break;
-		}
-		if (!p) {
-			printk("nfs_proc_readdir: giant filename\n");
-			status = NFSERR_IO;
-		}
-		else {
-			eof = (i == count && !*p++ && *p++)
-			      || (i < count && *p++);
-			if (eof && i)
-				entry[-1].eof = 1;
-			PRINTK("NFS reply readdir %d %s\n", i,
-			       eof ? "eof" : "");
-		}
-	}
-	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
-			ruid = 1;
-			goto retry;
-		}
-		PRINTK("NFS reply readdir failed = %d\n", status);
-	}
-	nfs_rpc_free(p0);
-	return (status == NFS_OK) ? i : -nfs_stat_to_errno(status);
-}
-
-int nfs_proc_statfs(struct nfs_server *server, struct nfs_fh *fhandle,
-		    struct nfs_fsinfo *res)
-{
-	int *p, *p0;
-	int status;
-	int ruid = 0;
-
-	PRINTK("NFS call  statfs\n");
-	if (!(p0 = nfs_rpc_alloc()))
-		return -EIO;
-retry:
-	p = nfs_rpc_header(p0, NFSPROC_STATFS, ruid);
-	p = xdr_encode_fhandle(p, fhandle);
-	if ((status = nfs_rpc_call(server, p0, p)) < 0) {
-		nfs_rpc_free(p0);
-		return status;
-	}
-	if (!(p = nfs_rpc_verify(p0)))
-		status = NFSERR_IO;
-	else if ((status = ntohl(*p++)) == NFS_OK) {
-		p = xdr_decode_fsinfo(p, res);
-		PRINTK("NFS reply statfs\n");
-	}
-	else {
-		if (!ruid && current->euid == 0 && current->uid != 0) {
-			ruid = 1;
-			goto retry;
-		}
-		PRINTK("NFS reply statfs failed = %d\n", status);
-	}
-	nfs_rpc_free(p0);
-	return -nfs_stat_to_errno(status);
+	fattr->valid = 0;
+	dprintk("NFS call  create %s\n", name->name);
+	status = rpc_call(NFS_CLIENT(dir), NFSPROC_CREATE, &arg, &res, 0);
+	dprintk("NFS reply create: %d\n", status);
+	return status;
 }
 
 /*
- * Here are a few RPC-assist functions.
+ * In NFSv2, mknod is grafted onto the create call.
  */
-
-static int *nfs_rpc_header(int *p, int procedure, int ruid)
+static int
+nfs_proc_mknod(struct inode *dir, struct qstr *name, struct iattr *sattr,
+	       dev_t rdev, struct nfs_fh *fhandle, struct nfs_fattr *fattr)
 {
-	int *p1, *p2;
-	int i;
-	static int xid = 0;
-	unsigned char *sys = (unsigned char *) system_utsname.nodename;
+	struct nfs_createargs	arg = { NFS_FH(dir), name->name,
+						     name->len, sattr };
+	struct nfs_diropok	res = { fhandle, fattr };
+	int			status, mode;
 
-	if (xid == 0) {
-		xid = CURRENT_TIME;
-		xid ^= (sys[3]<<24) | (sys[2]<<16) | (sys[1]<<8) | sys[0];
+	dprintk("NFS call  mknod %s\n", name->name);
+
+	mode = sattr->ia_mode;
+	if (S_ISFIFO(mode)) {
+		sattr->ia_mode = (mode & ~S_IFMT) | S_IFCHR;
+		sattr->ia_valid &= ~ATTR_SIZE;
+	} else if (S_ISCHR(mode) || S_ISBLK(mode)) {
+		sattr->ia_valid |= ATTR_SIZE;
+		sattr->ia_size   = rdev;	/* get out your barf bag */
 	}
-	*p++ = htonl(++xid);
-	*p++ = htonl(RPC_CALL);
-	*p++ = htonl(RPC_VERSION);
-	*p++ = htonl(NFS_PROGRAM);
-	*p++ = htonl(NFS_VERSION);
-	*p++ = htonl(procedure);
-	*p++ = htonl(RPC_AUTH_UNIX);
-	p1 = p++;
-	*p++ = htonl(CURRENT_TIME); /* traditional, could be anything */
-	p = xdr_encode_string(p, (char *) sys);
-	*p++ = htonl(ruid ? current->uid : current->euid);
-	*p++ = htonl(current->egid);
-	p2 = p++;
-	for (i = 0; i < 16 && i < NGROUPS && current->groups[i] != NOGROUP; i++)
-		*p++ = htonl(current->groups[i]);
-	*p2 = htonl(i);
-	*p1 = htonl((p - (p1 + 1)) << 2);
-	*p++ = htonl(RPC_AUTH_NULL);
-	*p++ = htonl(0);
-	return p;
+
+	fattr->valid = 0;
+	status = rpc_call(NFS_CLIENT(dir), NFSPROC_CREATE, &arg, &res, 0);
+
+	if (status == -EINVAL && S_ISFIFO(mode)) {
+		sattr->ia_mode = mode;
+		fattr->valid = 0;
+		status = rpc_call(NFS_CLIENT(dir), NFSPROC_CREATE, &arg, &res, 0);
+	}
+	dprintk("NFS reply mknod: %d\n", status);
+	return status;
+}
+  
+static int
+nfs_proc_remove(struct inode *dir, struct qstr *name)
+{
+	struct nfs_diropargs	arg = { NFS_FH(dir), name->name, name->len };
+	struct rpc_message	msg = { NFSPROC_REMOVE, &arg, NULL, NULL };
+	int			status;
+
+	dprintk("NFS call  remove %s\n", name->name);
+	status = rpc_call_sync(NFS_CLIENT(dir), &msg, 0);
+
+	dprintk("NFS reply remove: %d\n", status);
+	return status;
 }
 
-static int *nfs_rpc_verify(int *p)
+static int
+nfs_proc_unlink_setup(struct rpc_message *msg, struct dentry *dir, struct qstr *name)
 {
-	unsigned int n;
+	struct nfs_diropargs	*arg;
 
-	p++;
-	if ((n = ntohl(*p++)) != RPC_REPLY) {
-		printk("nfs_rpc_verify: not an RPC reply: %d\n", n);
-		return NULL;
-	}
-	if ((n = ntohl(*p++)) != RPC_MSG_ACCEPTED) {
-		printk("nfs_rpc_verify: RPC call rejected: %d\n", n);
-		return NULL;
-	}
-	switch (n = ntohl(*p++)) {
-	case RPC_AUTH_NULL: case RPC_AUTH_UNIX: case RPC_AUTH_SHORT:
-		break;
-	default:
-		printk("nfs_rpc_verify: bad RPC authentication type: %d\n", n);
-		return NULL;
-	}
-	if ((n = ntohl(*p++)) > 400) {
-		printk("nfs_rpc_verify: giant auth size\n");
-		return NULL;
-	}
-	p += (n + 3) >> 2;
-	if ((n = ntohl(*p++)) != RPC_SUCCESS) {
-		printk("nfs_rpc_verify: RPC call failed: %d\n", n);
-		return NULL;
-	}
-	return p;
+	arg = (struct nfs_diropargs *)kmalloc(sizeof(*arg), GFP_KERNEL);
+	if (!arg)
+		return -ENOMEM;
+	arg->fh = NFS_FH(dir->d_inode);
+	arg->name = name->name;
+	arg->len = name->len;
+	msg->rpc_proc = NFSPROC_REMOVE;
+	msg->rpc_argp = arg;
+	return 0;
 }
-	
+
+static void
+nfs_proc_unlink_done(struct dentry *dir, struct rpc_message *msg)
+{
+	if (msg->rpc_argp) {
+		NFS_CACHEINV(dir->d_inode);
+		kfree(msg->rpc_argp);
+	}
+}
+
+static int
+nfs_proc_rename(struct inode *old_dir, struct qstr *old_name,
+		struct inode *new_dir, struct qstr *new_name)
+{
+	struct nfs_renameargs	arg = { NFS_FH(old_dir), old_name->name,
+					old_name->len,
+					NFS_FH(new_dir), new_name->name,
+					new_name->len};
+	int			status;
+
+	dprintk("NFS call  rename %s -> %s\n", old_name->name, new_name->name);
+	status = rpc_call(NFS_CLIENT(old_dir), NFSPROC_RENAME, &arg, NULL, 0);
+	dprintk("NFS reply rename: %d\n", status);
+	return status;
+}
+
+static int
+nfs_proc_link(struct inode *inode, struct inode *dir, struct qstr *name)
+{
+	struct nfs_linkargs	arg = { NFS_FH(inode), NFS_FH(dir),
+					name->name, name->len };
+	int			status;
+
+	dprintk("NFS call  link %s\n", name->name);
+	status = rpc_call(NFS_CLIENT(inode), NFSPROC_LINK, &arg, NULL, 0);
+	dprintk("NFS reply link: %d\n", status);
+	return status;
+}
+
+static int
+nfs_proc_symlink(struct inode *dir, struct qstr *name, struct qstr *path,
+		 struct iattr *sattr, struct nfs_fh *fhandle,
+		 struct nfs_fattr *fattr)
+{
+	struct nfs_symlinkargs	arg = { NFS_FH(dir), name->name, name->len,
+					path->name, path->len, sattr };
+	int			status;
+
+	dprintk("NFS call  symlink %s -> %s\n", name->name, path->name);
+	fattr->valid = 0;
+	status = rpc_call(NFS_CLIENT(dir), NFSPROC_SYMLINK, &arg, NULL, 0);
+	dprintk("NFS reply symlink: %d\n", status);
+	return status;
+}
+
+static int
+nfs_proc_mkdir(struct inode *dir, struct qstr *name, struct iattr *sattr,
+	       struct nfs_fh *fhandle, struct nfs_fattr *fattr)
+{
+	struct nfs_createargs	arg = { NFS_FH(dir), name->name, name->len,
+					sattr };
+	struct nfs_diropok	res = { fhandle, fattr };
+	int			status;
+
+	dprintk("NFS call  mkdir %s\n", name->name);
+	fattr->valid = 0;
+	status = rpc_call(NFS_CLIENT(dir), NFSPROC_MKDIR, &arg, &res, 0);
+	dprintk("NFS reply mkdir: %d\n", status);
+	return status;
+}
+
+static int
+nfs_proc_rmdir(struct inode *dir, struct qstr *name)
+{
+	struct nfs_diropargs	arg = { NFS_FH(dir), name->name, name->len };
+	int			status;
+
+	dprintk("NFS call  rmdir %s\n", name->name);
+	status = rpc_call(NFS_CLIENT(dir), NFSPROC_RMDIR, &arg, NULL, 0);
+	dprintk("NFS reply rmdir: %d\n", status);
+	return status;
+}
+
 /*
- * We need to translate between nfs status return values and
- * the local errno values which may not be the same.
+ * The READDIR implementation is somewhat hackish - we pass a temporary
+ * buffer to the encode function, which installs it in the receive
+ * the receive iovec. The decode function just parses the reply to make
+ * sure it is syntactically correct; the entries itself are decoded
+ * from nfs_readdir by calling the decode_entry function directly.
  */
+static int
+nfs_proc_readdir(struct inode *dir, struct rpc_cred *cred,
+		 __u64 cookie, void *entry, 
+		 unsigned int size, int plus)
+{
+	struct nfs_readdirargs	arg;
+	struct nfs_readdirres	res;
+	struct rpc_message	msg = { NFSPROC_READDIR, &arg, &res, cred };
+	int			status;
 
-#ifndef EDQUOT
-#define EDQUOT	ENOSPC
-#endif
+	arg.fh = NFS_FH(dir);
+	arg.cookie = cookie;
+	arg.buffer = entry;
+	arg.bufsiz = size;
+	res.buffer = entry;
+	res.bufsiz = size;
 
-static struct {
-	int stat;
-	int errno;
-} nfs_errtbl[] = {
-	{ NFS_OK,		0		},
-	{ NFSERR_PERM,		EPERM		},
-	{ NFSERR_NOENT,		ENOENT		},
-	{ NFSERR_IO,		EIO		},
-	{ NFSERR_NXIO,		ENXIO		},
-	{ NFSERR_ACCES,		EACCES		},
-	{ NFSERR_EXIST,		EEXIST		},
-	{ NFSERR_NODEV,		ENODEV		},
-	{ NFSERR_NOTDIR,	ENOTDIR		},
-	{ NFSERR_ISDIR,		EISDIR		},
-	{ NFSERR_INVAL,		EINVAL		},
-	{ NFSERR_FBIG,		EFBIG		},
-	{ NFSERR_NOSPC,		ENOSPC		},
-	{ NFSERR_ROFS,		EROFS		},
-	{ NFSERR_NAMETOOLONG,	ENAMETOOLONG	},
-	{ NFSERR_NOTEMPTY,	ENOTEMPTY	},
-	{ NFSERR_DQUOT,		EDQUOT		},
-	{ NFSERR_STALE,		ESTALE		},
-#ifdef EWFLUSH
-	{ NFSERR_WFLUSH,	EWFLUSH		},
-#endif
-	{ -1,			EIO		}
+	dprintk("NFS call  readdir %d\n", (unsigned int)cookie);
+	status = rpc_call_sync(NFS_CLIENT(dir), &msg, 0);
+
+	dprintk("NFS reply readdir: %d\n", status);
+	return status;
+}
+
+static int
+nfs_proc_statfs(struct nfs_server *server, struct nfs_fh *fhandle,
+			struct nfs_fsinfo *info)
+{
+	int	status;
+
+	dprintk("NFS call  statfs\n");
+	memset((char *)info, 0, sizeof(*info));
+	status = rpc_call(server->client, NFSPROC_STATFS, fhandle, info, 0);
+	dprintk("NFS reply statfs: %d\n", status);
+	return status;
+}
+
+extern u32 * nfs_decode_dirent(u32 *, struct nfs_entry *, int);
+
+struct nfs_rpc_ops     nfs_v2_clientops = {
+       2,		       /* protocol version */
+       nfs_proc_get_root,
+       nfs_proc_getattr,
+       nfs_proc_setattr,
+       nfs_proc_lookup,
+       NULL,		       /* access */
+       nfs_proc_readlink,
+       nfs_proc_read,
+       nfs_proc_write,
+       NULL,		       /* commit */
+       nfs_proc_create,
+       nfs_proc_remove,
+       nfs_proc_unlink_setup,
+       nfs_proc_unlink_done,
+       nfs_proc_rename,
+       nfs_proc_link,
+       nfs_proc_symlink,
+       nfs_proc_mkdir,
+       nfs_proc_rmdir,
+       nfs_proc_readdir,
+       nfs_proc_mknod,
+       nfs_proc_statfs,
+       nfs_decode_dirent,
 };
-
-static int nfs_stat_to_errno(int stat)
-{
-	int i;
-
-	for (i = 0; nfs_errtbl[i].stat != -1; i++) {
-		if (nfs_errtbl[i].stat == stat)
-			return nfs_errtbl[i].errno;
-	}
-	printk("nfs_stat_to_errno: bad nfs status return value: %d\n", stat);
-	return nfs_errtbl[i].errno;
-}
-

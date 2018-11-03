@@ -3,106 +3,110 @@
  *
  *  Copyright (C) 1992  Rick Sladkey
  *
+ *  Optimization changes Copyright (C) 1994 Florian La Roche
+ *
+ *  Jun 7 1999, cache symlink lookups in the page cache.  -DaveM
+ *
  *  nfs symlink handling code
  */
 
-#include <asm/segment.h>
-
+#define NFS_NEED_XDR_TYPES
 #include <linux/sched.h>
 #include <linux/errno.h>
+#include <linux/sunrpc/clnt.h>
+#include <linux/nfs.h>
+#include <linux/nfs2.h>
 #include <linux/nfs_fs.h>
+#include <linux/pagemap.h>
 #include <linux/stat.h>
 #include <linux/mm.h>
 #include <linux/malloc.h>
+#include <linux/string.h>
+#include <linux/smp_lock.h>
 
-static int nfs_readlink(struct inode *, char *, int);
-static int nfs_follow_link(struct inode *, struct inode *, int, int,
-			   struct inode **);
+/* Symlink caching in the page cache is even more simplistic
+ * and straight-forward than readdir caching.
+ */
+static int nfs_symlink_filler(struct inode *inode, struct page *page)
+{
+	void *buffer = kmap(page);
+	int error;
+
+	/* We place the length at the beginning of the page,
+	 * in host byte order, followed by the string.  The
+	 * XDR response verification will NULL terminate it.
+	 */
+	lock_kernel();
+	error = NFS_PROTO(inode)->readlink(inode, buffer,
+					   PAGE_CACHE_SIZE - sizeof(u32)-4);
+	unlock_kernel();
+	if (error < 0)
+		goto error;
+	SetPageUptodate(page);
+	kunmap(page);
+	UnlockPage(page);
+	return 0;
+
+error:
+	SetPageError(page);
+	kunmap(page);
+	UnlockPage(page);
+	return -EIO;
+}
+
+static char *nfs_getlink(struct inode *inode, struct page **ppage)
+{
+	struct page *page;
+	u32 *p;
+
+	/* Caller revalidated the directory inode already. */
+	page = read_cache_page(&inode->i_data, 0,
+				(filler_t *)nfs_symlink_filler, inode);
+	if (IS_ERR(page))
+		goto read_failed;
+	if (!Page_Uptodate(page))
+		goto getlink_read_error;
+	*ppage = page;
+	p = kmap(page);
+	return (char*)(p+1);
+		
+getlink_read_error:
+	page_cache_release(page);
+	return ERR_PTR(-EIO);
+read_failed:
+	return (char*)page;
+}
+
+static int nfs_readlink(struct dentry *dentry, char *buffer, int buflen)
+{
+	struct inode *inode = dentry->d_inode;
+	struct page *page = NULL;
+	int res = vfs_readlink(dentry,buffer,buflen,nfs_getlink(inode,&page));
+	if (page) {
+		kunmap(page);
+		page_cache_release(page);
+	}
+	return res;
+}
+
+static int nfs_follow_link(struct dentry *dentry, struct nameidata *nd)
+{
+	struct inode *inode = dentry->d_inode;
+	struct page *page = NULL;
+	int res = vfs_follow_link(nd, nfs_getlink(inode,&page));
+	if (page) {
+		kunmap(page);
+		page_cache_release(page);
+	}
+	return res;
+}
 
 /*
  * symlinks can't do much...
  */
 struct inode_operations nfs_symlink_inode_operations = {
-	NULL,			/* no file-operations */
-	NULL,			/* create */
-	NULL,			/* lookup */
-	NULL,			/* link */
-	NULL,			/* unlink */
-	NULL,			/* symlink */
-	NULL,			/* mkdir */
-	NULL,			/* rmdir */
-	NULL,			/* mknod */
-	NULL,			/* rename */
-	nfs_readlink,		/* readlink */
-	nfs_follow_link,	/* follow_link */
-	NULL,			/* bmap */
-	NULL,			/* truncate */
-	NULL			/* permission */
+	readlink:	nfs_readlink,
+	follow_link:	nfs_follow_link,
+	revalidate:	nfs_revalidate,
+	setattr:	nfs_notify_change,
 };
-
-static int nfs_follow_link(struct inode *dir, struct inode *inode,
-			   int flag, int mode, struct inode **res_inode)
-{
-	int error;
-	char *res;
-
-	*res_inode = NULL;
-	if (!dir) {
-		dir = current->root;
-		dir->i_count++;
-	}
-	if (!inode) {
-		iput(dir);
-		return -ENOENT;
-	}
-	if (!S_ISLNK(inode->i_mode)) {
-		iput(dir);
-		*res_inode = inode;
-		return 0;
-	}
-	if (current->link_count > 5) {
-		iput(inode);
-		iput(dir);
-		return -ELOOP;
-	}
-	res = (char *) kmalloc(NFS_MAXPATHLEN + 1, GFP_KERNEL);
-	error = nfs_proc_readlink(NFS_SERVER(inode), NFS_FH(inode), res);
-	if (error) {
-		iput(inode);
-		iput(dir);
-		kfree_s(res, NFS_MAXPATHLEN + 1);
-		return error;
-	}
-	iput(inode);
-	current->link_count++;
-	error = open_namei(res, flag, mode, res_inode, dir);
-	current->link_count--;
-	kfree_s(res, NFS_MAXPATHLEN + 1);
-	return error;
-}
-
-static int nfs_readlink(struct inode *inode, char *buffer, int buflen)
-{
-	int i;
-	char c;
-	int error;
-	char *res;
-
-	if (!S_ISLNK(inode->i_mode)) {
-		iput(inode);
-		return -EINVAL;
-	}
-	if (buflen > NFS_MAXPATHLEN)
-		buflen = NFS_MAXPATHLEN;
-	res = (char *) kmalloc(buflen + 1, GFP_KERNEL);
-	error = nfs_proc_readlink(NFS_SERVER(inode), NFS_FH(inode), res);
-	iput(inode);
-	if (error) {
-		kfree_s(res, buflen + 1);
-		return error;
-	}
-	for (i = 0; i < buflen && (c = res[i]); i++)
-		put_fs_byte(c,buffer++);
-	kfree_s(res, buflen + 1);
-	return i;
-}

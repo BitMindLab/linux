@@ -1,84 +1,78 @@
 #
-# Makefile for the linux filesystem.
+# Makefile for the Linux filesystems.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definitions are now in the main makefile...
+# 14 Sep 2000, Christoph Hellwig <hch@caldera.de>
+# Rewritten to use lists instead of if-statements.
+# 
 
-SUBDIRS = minix ext ext2 msdos proc isofs nfs xiafs hpfs sysv
+O_TARGET := fs.o
 
-ifdef CONFIG_MINIX_FS
-FS_SUBDIRS := $(FS_SUBDIRS) minix
-endif
-ifdef CONFIG_EXT_FS
-FS_SUBDIRS := $(FS_SUBDIRS) ext
-endif
-ifdef CONFIG_EXT2_FS
-FS_SUBDIRS := $(FS_SUBDIRS) ext2
-endif
-ifdef CONFIG_MSDOS_FS
-FS_SUBDIRS := $(FS_SUBDIRS) msdos
-endif
-ifdef CONFIG_PROC_FS
-FS_SUBDIRS := $(FS_SUBDIRS) proc
-endif
-ifdef CONFIG_ISO9660_FS
-FS_SUBDIRS := $(FS_SUBDIRS) isofs
-endif
-ifdef CONFIG_NFS_FS
-FS_SUBDIRS := $(FS_SUBDIRS) nfs
-endif
-ifdef CONFIG_XIA_FS
-FS_SUBDIRS := $(FS_SUBDIRS) xiafs
-endif
-ifdef CONFIG_SYSV_FS
-FS_SUBDIRS := $(FS_SUBDIRS) sysv
-endif
-ifdef CONFIG_HPFS_FS
-FS_SUBDIRS := $(FS_SUBDIRS) hpfs
+export-objs :=	filesystems.o
+mod-subdirs :=	nls
+
+obj-y :=	open.o read_write.o devices.o file_table.o buffer.o \
+		super.o  block_dev.o stat.o exec.o pipe.o namei.o fcntl.o \
+		ioctl.o readdir.o select.o fifo.o locks.o \
+		dcache.o inode.o attr.o bad_inode.o file.o iobuf.o dnotify.o \
+		filesystems.o
+
+ifeq ($(CONFIG_QUOTA),y)
+obj-y += dquot.o
+else
+obj-y += noquot.o
 endif
 
-ifdef CONFIG_BINFMT_ELF
-BINFMTS := $(BINFMTS) binfmt_elf.o
-endif
-ifdef CONFIG_BINFMT_COFF
-BINFMTS := $(BINFMTS) binfmt_coff.o
-endif
+subdir-$(CONFIG_PROC_FS)	+= proc
+subdir-y			+= partitions
 
-.c.s:
-	$(CC) $(CFLAGS) -S $<
-.c.o:
-	$(CC) $(CFLAGS) -c $<
-.s.o:
-	$(AS) -o $*.o $<
+# Do not add any filesystems before this line
+subdir-$(CONFIG_EXT2_FS)	+= ext2
+subdir-$(CONFIG_CRAMFS)		+= cramfs
+subdir-$(CONFIG_RAMFS)		+= ramfs
+subdir-$(CONFIG_CODA_FS)	+= coda
+subdir-$(CONFIG_MINIX_FS)	+= minix
+subdir-$(CONFIG_FAT_FS)		+= fat
+subdir-$(CONFIG_MSDOS_FS)	+= msdos
+subdir-$(CONFIG_VFAT_FS)	+= vfat
+subdir-$(CONFIG_BFS_FS)		+= bfs
+subdir-$(CONFIG_ISO9660_FS)	+= isofs
+subdir-$(CONFIG_DEVFS_FS)	+= devfs
+subdir-$(CONFIG_HFS_FS)		+= hfs
+subdir-$(CONFIG_NFS_FS)		+= nfs
+subdir-$(CONFIG_NFSD)		+= nfsd
+subdir-$(CONFIG_LOCKD)		+= lockd
+subdir-$(CONFIG_NLS)		+= nls
+subdir-$(CONFIG_UMSDOS_FS)	+= umsdos
+subdir-$(CONFIG_SYSV_FS)	+= sysv
+subdir-$(CONFIG_SMB_FS)		+= smbfs
+subdir-$(CONFIG_NCP_FS)		+= ncpfs
+subdir-$(CONFIG_HPFS_FS)	+= hpfs
+subdir-$(CONFIG_NTFS_FS)	+= ntfs
+subdir-$(CONFIG_UFS_FS)		+= ufs
+subdir-$(CONFIG_EFS_FS)		+= efs
+subdir-$(CONFIG_JFFS_FS)	+= jffs
+subdir-$(CONFIG_AFFS_FS)	+= affs
+subdir-$(CONFIG_ROMFS_FS)	+= romfs
+subdir-$(CONFIG_QNX4FS_FS)	+= qnx4
+subdir-$(CONFIG_UDF_FS)		+= udf
+subdir-$(CONFIG_AUTOFS_FS)	+= autofs
+subdir-$(CONFIG_AUTOFS4_FS)	+= autofs4
+subdir-$(CONFIG_ADFS_FS)	+= adfs
+subdir-$(CONFIG_DEVPTS_FS)	+= devpts
+subdir-$(CONFIG_SUN_OPENPROMFS)	+= openpromfs
 
-OBJS=	open.o read_write.o inode.o devices.o file_table.o buffer.o super.o \
-	block_dev.o stat.o exec.o pipe.o namei.o fcntl.o ioctl.o \
-	select.o fifo.o locks.o filesystems.o $(BINFMTS)
 
-all: fs.o filesystems.a
+obj-$(CONFIG_BINFMT_AOUT)	+= binfmt_aout.o
+obj-$(CONFIG_BINFMT_EM86)	+= binfmt_em86.o
+obj-$(CONFIG_BINFMT_MISC)	+= binfmt_misc.o
 
-fs.o: $(OBJS)
-	$(LD) -r -o fs.o $(OBJS)
+# binfmt_script is always there
+obj-y				+= binfmt_script.o
 
-filesystems.a: dummy
-	rm -f filesystems.a
-	set -e; for i in $(FS_SUBDIRS); do \
-	  test ! -d $$i || \
-	    { $(MAKE) -C $$i; $(AR) rcs filesystems.a $$i/$$i.o; }; done
+obj-$(CONFIG_BINFMT_ELF)	+= binfmt_elf.o
 
-depend dep:
-	$(CPP) -M *.c > .depend
-	set -e; for i in $(SUBDIRS); do \
-	  test ! -d $$i || $(MAKE) -C $$i dep; done
+# persistent filesystems
+obj-y += $(join $(subdir-y),$(subdir-y:%=/%.o))
 
-dummy:
 
-#
-# include a dependency file if one exists
-#
-ifeq (.depend,$(wildcard .depend))
-include .depend
-endif
+include $(TOPDIR)/Rules.make
