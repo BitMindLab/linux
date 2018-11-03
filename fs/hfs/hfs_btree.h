@@ -2,7 +2,7 @@
  * linux/fs/hfs/hfs_btree.h
  *
  * Copyright (C) 1995-1997  Paul H. Hargrove
- * This file may be distributed under the terms of the GNU Public License.
+ * This file may be distributed under the terms of the GNU General Public License.
  *
  * This file contains the declarations of the private B-tree
  * structures and functions.
@@ -194,8 +194,7 @@ struct hfs_btree {
 	struct hfs_bnode		       /* The bnode cache */
 				*cache[HFS_CACHELEN];
 	struct hfs_cat_entry	entry;	       /* Fake catalog entry */
-	int			lock;
-	hfs_wait_queue		wait;
+	struct semaphore	sem;
 	int			dirt;
 	int                     keySize;   
 	/* Fields from the BTHdrRec in native byte-order: */

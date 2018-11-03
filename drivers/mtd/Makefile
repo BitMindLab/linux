@@ -1,61 +1,41 @@
 #
 # Makefile for the memory technology device drivers.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
+# $Id: Makefile.common,v 1.2 2003/05/23 11:38:29 dwmw2 Exp $
+
+#                       *** BIG UGLY NOTE ***
 #
-# Note 2! The CFLAGS definitions are now inherited from the
-# parent makes..
+# The shiny new inter_module_xxx has introduced yet another ugly link
+# order dependency, which I'd previously taken great care to avoid.
+# We now have to ensure that the chip drivers are initialised before the
+# map drivers, and that the doc200[01] drivers are initialised before
+# docprobe.
 #
-# $Id: Makefile,v 1.22 2000/07/14 08:10:52 dwmw2 Exp $
+# We'll hopefully merge the doc200[01] drivers and docprobe back into
+# a single driver some time soon, but the CFI drivers are going to have
+# to stay like that.
+#
+# Urgh.
+# 
+# dwmw2 21/11/0
 
-# Object file lists.
-
-obj-y           :=
-obj-m           :=
-obj-n           :=
-obj-            :=
-
-O_TARGET	:= mtdlink.o
-SUB_DIRS	:=
-ALL_SUB_DIRS 	:=
-MOD_SUB_DIRS	:=
-
-export-objs	:=	mtdcore.o mtdpart.o jedec.o
-list-multi	:=
-
-# MTD devices
+# Core functionality.
 obj-$(CONFIG_MTD)		+= mtdcore.o
-obj-$(CONFIG_MTD_DOC1000)	+= doc1000.o
-obj-$(CONFIG_MTD_DOC2000)	+= doc2000.o
-obj-$(CONFIG_MTD_DOC2001)	+= doc2001.o
-obj-$(CONFIG_MTD_DOCPROBE)	+= docprobe.o docecc.o
-obj-$(CONFIG_MTD_SLRAM)		+= slram.o
-obj-$(CONFIG_MTD_PMC551)	+= pmc551.o
-obj-$(CONFIG_MTD_MTDRAM)	+= mtdram.o
+obj-$(CONFIG_MTD_CONCAT)	+= mtdconcat.o
+obj-$(CONFIG_MTD_PARTITIONS)	+= mtdpart.o
+obj-$(CONFIG_MTD_REDBOOT_PARTS) += redboot.o
+obj-$(CONFIG_MTD_CMDLINE_PARTS) += cmdlinepart.o
+obj-$(CONFIG_MTD_AFS_PARTS)	+= afs.o
 
-# Chip drivers
-obj-$(CONFIG_MTD_JEDEC)		+= jedec.o
-obj-$(CONFIG_MTD_RAM)		+= map_ram.o
-obj-$(CONFIG_MTD_ROM)		+= map_rom.o
-obj-$(CONFIG_MTD_CFI)		+= cfi_probe.o
-obj-$(CONFIG_MTD_CFI_INTELEXT)	+= cfi_cmdset_0001.o
-obj-$(CONFIG_MTD_CFI_AMDSTD)	+= cfi_cmdset_0002.o
-
-# Chip mappings
-obj-$(CONFIG_MTD_PHYSMAP)	+= physmap.o
-obj-$(CONFIG_MTD_MIXMEM)	+= mixmem.o
-obj-$(CONFIG_MTD_NORA)		+= nora.o
-obj-$(CONFIG_MTD_OCTAGON)	+= octagon-5066.o
-obj-$(CONFIG_MTD_PNC2000)	+= pnc2000.o mtdpart.o
-obj-$(CONFIG_MTD_RPXLITE)	+= rpxlite.o
-obj-$(CONFIG_MTD_VMAX)		+= vmax301.o
-
-# Users
+# 'Users' - code which presents functionality to userspace.
 obj-$(CONFIG_MTD_CHAR)		+= mtdchar.o
-obj-$(CONFIG_MTD_BLOCK)		+= mtdblock.o
-obj-$(CONFIG_FTL)		+= ftl.o
-obj-$(CONFIG_NFTL)		+= nftl.o nftlmount.o
+obj-$(CONFIG_MTD_BLOCK)		+= mtdblock.o mtd_blkdevs.o
+obj-$(CONFIG_MTD_BLOCK_RO)	+= mtdblock_ro.o mtd_blkdevs.o
+obj-$(CONFIG_FTL)		+= ftl.o mtd_blkdevs.o
+obj-$(CONFIG_NFTL)		+= nftl.o mtd_blkdevs.o
+obj-$(CONFIG_INFTL)		+= inftl.o mtd_blkdevs.o
 
-include $(TOPDIR)/Rules.make
+nftl-objs		:= nftlcore.o nftlmount.o
+inftl-objs		:= inftlcore.o inftlmount.o
+
+obj-y		+= chips/ maps/ devices/ nand/

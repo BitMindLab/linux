@@ -100,7 +100,7 @@ FPU_bits_lost:
 	.byte	0
 FPU_denormal:
 	.byte	0
-#endif NON_REENTRANT_FPU
+#endif /* NON_REENTRANT_FPU */
 
 
 .text
@@ -126,13 +126,13 @@ fpu_reg_round:			/* Normal entry point */
 
 #ifndef NON_REENTRANT_FPU
 	pushl	%ebx		/* adjust the stack pointer */
-#endif NON_REENTRANT_FPU
+#endif /* NON_REENTRANT_FPU */ 
 
 #ifdef PARANOID
 /* Cannot use this here yet */
 /*	orl	%eax,%eax */
 /*	jns	L_entry_bugged */
-#endif PARANOID
+#endif /* PARANOID */
 
 	cmpw	EXP_UNDER,EXP(%edi)
 	jle	L_Make_denorm			/* The number is a de-normal */
@@ -160,12 +160,12 @@ Denorm_done:
 	je	LRound_To_64
 #ifdef PARANOID
 	jmp	L_bugged_denorm_486
-#endif PARANOID
+#endif /* PARANOID */ 
 #else
 #ifdef PARANOID
 	jmp	L_bugged_denorm	/* There is no bug, just a bad control word */
-#endif PARANOID
-#endif PECULIAR_486
+#endif /* PARANOID */ 
+#endif /* PECULIAR_486 */
 
 
 /* Round etc to 24 bit precision */
@@ -186,7 +186,7 @@ LRound_To_24:
 
 #ifdef PARANOID
 	jmp	L_bugged_round24
-#endif PARANOID
+#endif /* PARANOID */ 
 
 LUp_24:
 	cmpb	SIGN_POS,PARAM5
@@ -266,7 +266,7 @@ LRound_To_53:
 
 #ifdef PARANOID
 	jmp	L_bugged_round53
-#endif PARANOID
+#endif /* PARANOID */ 
 
 LUp_53:
 	cmpb	SIGN_POS,PARAM5
@@ -340,7 +340,7 @@ LRound_To_64:
 
 #ifdef PARANOID
 	jmp	L_bugged_round64
-#endif PARANOID
+#endif /* PARANOID */ 
 
 LUp_64:
 	cmpb	SIGN_POS,PARAM5
@@ -430,7 +430,7 @@ fpu_reg_round_special_exit:
 
 #ifndef NON_REENTRANT_FPU
 	popl	%ebx		/* adjust the stack pointer */
-#endif NON_REENTRANT_FPU
+#endif /* NON_REENTRANT_FPU */ 
 
 fpu_Arith_exit:
 	popl	%ebx
@@ -447,7 +447,7 @@ fpu_Arith_exit:
 L_precision_lost_up:
 	push	%edx
 	push	%eax
-	call	SYMBOL_NAME(set_precision_flag_up)
+	call	set_precision_flag_up
 	popl	%eax
 	popl	%edx
 	jmp	L_no_precision_loss
@@ -459,7 +459,7 @@ L_precision_lost_up:
 L_precision_lost_down:
 	push	%edx
 	push	%eax
-	call	SYMBOL_NAME(set_precision_flag_down)
+	call	set_precision_flag_down
 	popl	%eax
 	popl	%edx
 	jmp	L_no_precision_loss
@@ -570,7 +570,7 @@ Normalise_result:
 	/* But check it... just in case. */
 	cmpw	EXP_UNDER+1,EXP(%edi)
 	jne	L_norm_bugged
-#endif PARANOID
+#endif /* PARANOID */
 
 #ifdef PECULIAR_486
 	/*
@@ -586,7 +586,7 @@ Normalise_result:
 #else
 	orl	%eax,%eax		/* ms bits */
 	js	L_Normalised		/* No longer a denormal */
-#endif PECULIAR_486
+#endif /* PECULIAR_486 */ 
 
 	jnz	LDenormal_adj_exponent
 
@@ -617,7 +617,7 @@ LPseudoDenormal:
  */
 L_underflow_to_zero:
 	push	%eax
-	call	SYMBOL_NAME(set_precision_flag_down)
+	call	set_precision_flag_down
 	popl	%eax
 
 	push	%eax
@@ -636,7 +636,7 @@ L_underflow_to_zero:
 L_overflow:
 	addw	EXTENDED_Ebias,EXP(%edi)	/* Set for unmasked response. */
 	push	%edi
-	call	SYMBOL_NAME(arith_overflow)
+	call	arith_overflow
 	pop	%edi
 	jmp	fpu_reg_round_signed_special_exit
 
@@ -673,7 +673,7 @@ L_bugged_denorm:
 	call	EXCEPTION
 	popl	%ebx
 	jmp	L_exception_exit
-#endif PECULIAR_486
+#endif /* PECULIAR_486 */ 
 
 L_bugged_round24:
 	pushl	EX_INTERNAL|0x231
@@ -706,4 +706,4 @@ L_entry_bugged:
 L_exception_exit:
 	mov	$-1,%eax
 	jmp	fpu_reg_round_special_exit
-#endif PARANOID
+#endif /* PARANOID */ 

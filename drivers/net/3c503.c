@@ -4,12 +4,14 @@
 
     Copyright 1993 United States Government as represented by the
     Director, National Security Agency.  This software may be used and
-    distributed according to the terms of the GNU Public License,
+    distributed according to the terms of the GNU General Public License,
     incorporated herein by reference.
 
-    The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-    Center of Excellence in Space Data and Information Sciences
-       Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+    The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
+
 
     This driver should work with the 3c503 and 3c503/16.  It should be used
     in shared memory mode for best performance, although it may also work
@@ -27,23 +29,29 @@
     Paul Gortmaker	: add support for the 2nd 8kB of RAM on 16 bit cards.
     Paul Gortmaker	: multiple card support for module users.
     rjohnson@analogic.com : Fix up PIO interface for efficient operation.
+    Jeff Garzik		: ethtool support
 
 */
 
-static const char *version =
-    "3c503.c:v1.10 9/23/93  Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
+#define DRV_NAME	"3c503"
+#define DRV_VERSION	"1.10a"
+#define DRV_RELDATE	"11/17/2001"
+
+
+static const char version[] =
+    DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE "  Donald Becker (becker@scyld.com)\n";
 
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/init.h>
+#include <linux/ethtool.h>
 
+#include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/byteorder.h>
@@ -53,8 +61,8 @@ static const char *version =
 #define WRD_COUNT 4
 
 int el2_probe(struct net_device *dev);
-int el2_pio_probe(struct net_device *dev);
-int el2_probe1(struct net_device *dev, int ioaddr);
+static int el2_pio_probe(struct net_device *dev);
+static int el2_probe1(struct net_device *dev, int ioaddr);
 
 /* A zero-terminated list of I/O addresses to be probed in PIO mode. */
 static unsigned int netcard_portlist[] __initdata =
@@ -72,6 +80,7 @@ static void el2_block_input(struct net_device *dev, int count, struct sk_buff *s
 			   int ring_offset);
 static void el2_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 			 int ring_page);
+static struct ethtool_ops netdev_ethtool_ops;
 
 
 /* This routine probes for a memory-mapped 3c503 board by looking for
@@ -115,7 +124,7 @@ el2_probe(struct net_device *dev)
 
 /*  Try all of the locations that aren't obviously empty.  This touches
     a lot of locations, and is much riskier than the code above. */
-int __init 
+static int __init 
 el2_pio_probe(struct net_device *dev)
 {
     int i;
@@ -136,13 +145,14 @@ el2_pio_probe(struct net_device *dev)
 /* Probe for the Etherlink II card at I/O port base IOADDR,
    returning non-zero on success.  If found, set the station
    address and memory parameters in DEVICE. */
-int __init 
+static int __init 
 el2_probe1(struct net_device *dev, int ioaddr)
 {
     int i, iobase_reg, membase_reg, saved_406, wordlength, retval;
     static unsigned version_printed;
     unsigned long vendor_id;
 
+    /* FIXME: code reads ioaddr + 0x400, we request ioaddr + 16 */
     if (!request_region(ioaddr, EL2_IO_EXTENT, dev->name))
 	return -EBUSY;
 
@@ -250,13 +260,14 @@ el2_probe1(struct net_device *dev, int ioaddr)
 	}
 #endif  /* EL2MEMTEST */
 
-	dev->mem_end = dev->rmem_end = dev->mem_start + EL2_MEMSIZE;
+	if (dev->mem_start)
+		dev->mem_end = ei_status.rmem_end = dev->mem_start + EL2_MEMSIZE;
 
 	if (wordlength) {	/* No Tx pages to skip over to get to Rx */
-		dev->rmem_start = dev->mem_start;
+		ei_status.rmem_start = dev->mem_start;
 		ei_status.name = "3c503/16";
 	} else {
-		dev->rmem_start = TX_PAGES*256 + dev->mem_start;
+		ei_status.rmem_start = TX_PAGES*256 + dev->mem_start;
 		ei_status.name = "3c503";
 	}
     }
@@ -297,6 +308,7 @@ el2_probe1(struct net_device *dev, int ioaddr)
 
     dev->open = &el2_open;
     dev->stop = &el2_close;
+    dev->ethtool_ops = &netdev_ethtool_ops;
 
     if (dev->mem_start)
 	printk("%s: %s - %dkB RAM, 8kB shared mem window at %#6lx-%#6lx.\n",
@@ -498,6 +510,7 @@ el2_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_pag
 
     if (dev->mem_start) {       /* Use the shared memory. */
 	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	hdr->count = le16_to_cpu(hdr->count);
 	return;
     }
 
@@ -535,7 +548,7 @@ el2_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring
     unsigned short int *buf;
     unsigned short word;
 
-    int end_of_ring = dev->rmem_end;
+    int end_of_ring = ei_status.rmem_end;
 
     /* Maybe enable shared memory just be to be safe... nahh.*/
     if (dev->mem_start) {	/* Use the shared memory. */
@@ -545,7 +558,7 @@ el2_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring
 	    int semi_count = end_of_ring - (dev->mem_start + ring_offset);
 	    isa_memcpy_fromio(skb->data, dev->mem_start + ring_offset, semi_count);
 	    count -= semi_count;
-	    isa_memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
+	    isa_memcpy_fromio(skb->data + semi_count, ei_status.rmem_start, count);
 	} else {
 		/* Packet is in one chunk -- we can copy + cksum. */
 		isa_eth_io_copy_and_sum(skb, dev->mem_start + ring_offset, count, 0);
@@ -603,6 +616,20 @@ el2_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring
     outb_p(ei_status.interface_num == 0 ? ECNTRL_THIN : ECNTRL_AUI, E33G_CNTRL);
     return;
 }
+
+
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	sprintf(info->bus_info, "ISA 0x%lx", dev->base_addr);
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+};
+
 #ifdef MODULE
 #define MAX_EL2_CARDS	4	/* Max number of EL2 cards per module */
 
@@ -613,6 +640,11 @@ static int xcvr[MAX_EL2_CARDS];	/* choose int. or ext. xcvr */
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
 MODULE_PARM(xcvr, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
+MODULE_PARM_DESC(io, "I/O base address(es)");
+MODULE_PARM_DESC(irq, "IRQ number(s) (assigned)");
+MODULE_PARM_DESC(xcvr, "transceiver(s) (0=internal, 1=external)");
+MODULE_DESCRIPTION("3Com ISA EtherLink II, II/16 (3c503, 3c503/16) driver");
+MODULE_LICENSE("GPL");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
@@ -660,11 +692,3 @@ cleanup_module(void)
 	}
 }
 #endif /* MODULE */
-
-/*
- * Local variables:
- *  version-control: t
- *  kept-new-versions: 5
- *  c-indent-level: 4
- * End:
- */

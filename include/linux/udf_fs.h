@@ -16,7 +16,7 @@
  * CONTACTS
  *	E-mail regarding any portion of the Linux UDF file system should be
  *	directed to the development team mailing list (run by majordomo):
- *		linux_udf@hootie.lvld.hp.com
+ *		linux_udf@hpesjro.fc.hp.com
  *
  * COPYRIGHT
  *	This file is distributed under the terms of the GNU General Public
@@ -31,14 +31,14 @@
  *
  */
 
-#if !defined(_LINUX_UDF_FS_H)
-#define _LINUX_UDF_FS_H
+#ifndef _UDF_FS_H
+#define _UDF_FS_H 1
 
 #define UDF_PREALLOCATE
-#define UDF_DEFAULT_PREALLOC_BLOCKS		8
+#define UDF_DEFAULT_PREALLOC_BLOCKS	8
 
-#define UDFFS_DATE		"2000/02/29"
-#define UDFFS_VERSION	"0.9.1"
+#define UDFFS_DATE			"2002/11/15"
+#define UDFFS_VERSION			"0.9.7"
 
 #define UDFFS_DEBUG
 
@@ -56,4 +56,4 @@
 #define udf_info(f, a...) \
 		printk (KERN_INFO "UDF-fs INFO " f, ##a);
 
-#endif /* !defined(_LINUX_UDF_FS_H) */
+#endif /* _UDF_FS_H */

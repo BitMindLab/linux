@@ -1,20 +1,18 @@
 /*
+ * PCBIT-D low-layer interface
+ *
  * Copyright (C) 1996 Universidade de Lisboa
  *
  * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
  *
  * This software may be used and distributed according to the terms of
- * the GNU Public License, incorporated herein by reference.
+ * the GNU General Public License, incorporated herein by reference.
  */
 
 /*
  * 19991203 - Fernando Carvalho - takion@superbofh.org
  * Hacked to compile with egcs and run with current version of isdn modules
 */
-
-/*
- *        PCBIT-D low-layer interface
- */
 
 /*
  *        Based on documentation provided by Inesc:
@@ -26,23 +24,13 @@
  *              re-write/remove debug printks
  */
 
-#define __NO_VERSION__
-
-
-#ifdef MODULE
-#define INCLUDE_INLINE_FUNCS
-#endif
-
-
-#include <linux/module.h>
-
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
-#include <linux/tqueue.h>
+#include <linux/workqueue.h>
 #include <linux/mm.h>
 #include <linux/skbuff.h>
 
@@ -93,8 +81,7 @@ static void pcbit_firmware_bug(struct pcbit_dev *dev);
 static __inline__ void
 pcbit_sched_delivery(struct pcbit_dev *dev)
 {
-	queue_task(&dev->qdelivery, &tq_immediate);
-	mark_bh(IMMEDIATE_BH);
+	schedule_work(&dev->qdelivery);
 }
 
 
@@ -176,7 +163,6 @@ pcbit_transmit(struct pcbit_dev *dev)
 	struct frame_buf *frame = NULL;
 	unsigned char unacked;
 	int flen;               /* fragment frame length including all headers */
-	int totlen;             /* non-fragmented frame length */
 	int free;
 	int count,
 	 cp_len;
@@ -213,11 +199,12 @@ pcbit_transmit(struct pcbit_dev *dev)
 			ulong 	msg;
 
 			if (frame->skb)
-				totlen = FRAME_HDR_LEN + PREHDR_LEN + frame->skb->len;
+				flen = FRAME_HDR_LEN + PREHDR_LEN + frame->skb->len;
 			else
-				totlen = FRAME_HDR_LEN + PREHDR_LEN;
+				flen = FRAME_HDR_LEN + PREHDR_LEN;
 
-			flen = MIN(totlen, free);
+			if (flen > free)
+				flen = free;
 
 			msg = frame->msg;
 
@@ -259,9 +246,10 @@ pcbit_transmit(struct pcbit_dev *dev)
 		} else {
 			/* Type 1 frame */
 
-			totlen = 2 + (frame->skb->len - frame->copied);
+			flen = 2 + (frame->skb->len - frame->copied);
 
-			flen = MIN(totlen, free);
+			if (flen > free)
+				flen = free;
 
 			/* TT */
 			tt = ((ushort) (flen - 2)) | 0x8000U;	/* Type 1 */
@@ -271,8 +259,9 @@ pcbit_transmit(struct pcbit_dev *dev)
 		}
 
 		if (frame->skb) {
-			cp_len = MIN(frame->skb->len - frame->copied,
-				     flen - count);
+			cp_len = frame->skb->len - frame->copied;
+			if (cp_len > flen - count)
+				cp_len = flen - count;
 
 			memcpy_topcbit(dev, frame->skb->data + frame->copied,
 				       cp_len);
@@ -535,7 +524,7 @@ pcbit_firmware_bug(struct pcbit_dev *dev)
 	}
 }
 
-void
+irqreturn_t
 pcbit_irq_handler(int interrupt, void *devptr, struct pt_regs *regs)
 {
 	struct pcbit_dev *dev;
@@ -547,11 +536,11 @@ pcbit_irq_handler(int interrupt, void *devptr, struct pt_regs *regs)
 
 	if (!dev) {
 		printk(KERN_WARNING "pcbit_irq_handler: wrong device\n");
-		return;
+		return IRQ_NONE;
 	}
 	if (dev->interrupt) {
 		printk(KERN_DEBUG "pcbit: reentering interrupt hander\n");
-		return;
+		return IRQ_HANDLED;
 	}
 	dev->interrupt = 1;
 
@@ -560,7 +549,7 @@ pcbit_irq_handler(int interrupt, void *devptr, struct pt_regs *regs)
 	if (dev->l2_state == L2_STARTING || dev->l2_state == L2_ERROR) {
 		pcbit_l2_active_conf(dev, info);
 		dev->interrupt = 0;
-		return;
+		return IRQ_HANDLED;
 	}
 	if (info & 0x40U) {     /* E bit set */
 #ifdef DEBUG
@@ -568,11 +557,11 @@ pcbit_irq_handler(int interrupt, void *devptr, struct pt_regs *regs)
 #endif
 		pcbit_l2_error(dev);
 		dev->interrupt = 0;
-		return;
+		return IRQ_HANDLED;
 	}
 	if (dev->l2_state != L2_RUNNING && dev->l2_state != L2_LOADING) {
 		dev->interrupt = 0;
-		return;
+		return IRQ_HANDLED;
 	}
 	ack_seq = (info >> 3) & 0x07U;
 	read_seq = (info & 0x07U);
@@ -593,6 +582,7 @@ pcbit_irq_handler(int interrupt, void *devptr, struct pt_regs *regs)
 	info |= dev->send_seq;
 
 	writeb(info, dev->sh_mem + BANK4);
+	return IRQ_HANDLED;
 }
 
 

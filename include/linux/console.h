@@ -15,7 +15,6 @@
 #define _LINUX_CONSOLE_H_ 1
 
 #include <linux/types.h>
-#include <linux/kdev_t.h>
 #include <linux/spinlock.h>
 
 struct vc_data;
@@ -40,6 +39,7 @@ struct consw {
 	int	(*con_switch)(struct vc_data *);
 	int	(*con_blank)(struct vc_data *, int);
 	int	(*con_font_op)(struct vc_data *, struct console_font_op *);
+	int	(*con_resize)(struct vc_data *, unsigned int, unsigned int);
 	int	(*con_set_palette)(struct vc_data *, unsigned char *);
 	int	(*con_scrolldelta)(struct vc_data *, int);
 	int	(*con_set_origin)(struct vc_data *);
@@ -91,26 +91,28 @@ extern struct console_cmdline console_list[MAX_CMDLINECONSOLES];
 #define CON_CONSDEV	(2) /* Last on the command line */
 #define CON_ENABLED	(4)
 
-extern spinlock_t console_lock;
-
 struct console
 {
 	char	name[8];
 	void	(*write)(struct console *, const char *, unsigned);
-	int	(*read)(struct console *, const char *, unsigned);
-	kdev_t	(*device)(struct console *);
-	int	(*wait_key)(struct console *);
+	int	(*read)(struct console *, char *, unsigned);
+	struct tty_driver *(*device)(struct console *, int *);
 	void	(*unblank)(void);
 	int	(*setup)(struct console *, char *);
 	short	flags;
 	short	index;
 	int	cflag;
+	void	*data;
 	struct	 console *next;
 };
 
 extern void register_console(struct console *);
 extern int unregister_console(struct console *);
 extern struct console *console_drivers;
+extern void acquire_console_sem(void);
+extern void release_console_sem(void);
+extern void console_conditional_schedule(void);
+extern void console_unblank(void);
 
 /* VESA Blanking Levels */
 #define VESA_NO_BLANKING        0

@@ -9,124 +9,124 @@
 
 #include <asm/io.h>
 
-unsigned int _inb(unsigned long addr)
+u8 _inb(unsigned long addr)
 {
 	return __inb(addr);
 }
 
-unsigned int _inw(unsigned long addr)
+u16 _inw(unsigned long addr)
 {
 	return __inw(addr);
 }
 
-unsigned int _inl(unsigned long addr)
+u32 _inl(unsigned long addr)
 {
 	return __inl(addr);
 }
 
 
-void _outb(unsigned char b, unsigned long addr)
+void _outb(u8 b, unsigned long addr)
 {
 	__outb(b, addr);
 }
 
-void _outw(unsigned short b, unsigned long addr)
+void _outw(u16 b, unsigned long addr)
 {
 	__outw(b, addr);
 }
 
-void _outl(unsigned int b, unsigned long addr)
+void _outl(u32 b, unsigned long addr)
 {
 	__outl(b, addr);
 }
 
-unsigned long ___raw_readb(unsigned long addr)
+u8 ___raw_readb(unsigned long addr)
 {
 	return __readb(addr);
 }
 
-unsigned long ___raw_readw(unsigned long addr)
+u16 ___raw_readw(unsigned long addr)
 {
 	return __readw(addr);
 }
 
-unsigned long ___raw_readl(unsigned long addr)
+u32 ___raw_readl(unsigned long addr)
 {
 	return __readl(addr);
 }
 
-unsigned long ___raw_readq(unsigned long addr)
+u64 ___raw_readq(unsigned long addr)
 {
 	return __readq(addr);
 }
 
-unsigned long _readb(unsigned long addr)
+u8 _readb(unsigned long addr)
 {
 	unsigned long r = __readb(addr);
 	mb();
 	return r;
 }
 
-unsigned long _readw(unsigned long addr)
+u16 _readw(unsigned long addr)
 {
 	unsigned long r = __readw(addr);
 	mb();
 	return r;
 }
 
-unsigned long _readl(unsigned long addr)
+u32 _readl(unsigned long addr)
 {
 	unsigned long r = __readl(addr);
 	mb();
 	return r;
 }
 
-unsigned long _readq(unsigned long addr)
+u64 _readq(unsigned long addr)
 {
 	unsigned long r = __readq(addr);
 	mb();
 	return r;
 }
 
-void ___raw_writeb(unsigned char b, unsigned long addr)
+void ___raw_writeb(u8 b, unsigned long addr)
 {
 	__writeb(b, addr);
 }
 
-void ___raw_writew(unsigned short b, unsigned long addr)
+void ___raw_writew(u16 b, unsigned long addr)
 {
 	__writew(b, addr);
 }
 
-void ___raw_writel(unsigned int b, unsigned long addr)
+void ___raw_writel(u32 b, unsigned long addr)
 {
 	__writel(b, addr);
 }
 
-void ___raw_writeq(unsigned long b, unsigned long addr)
+void ___raw_writeq(u64 b, unsigned long addr)
 {
 	__writeq(b, addr);
 }
 
-void _writeb(unsigned char b, unsigned long addr)
+void _writeb(u8 b, unsigned long addr)
 {
 	__writeb(b, addr);
 	mb();
 }
 
-void _writew(unsigned short b, unsigned long addr)
+void _writew(u16 b, unsigned long addr)
 {
 	__writew(b, addr);
 	mb();
 }
 
-void _writel(unsigned int b, unsigned long addr)
+void _writel(u32 b, unsigned long addr)
 {
 	__writel(b, addr);
 	mb();
 }
 
-void _writeq(unsigned long b, unsigned long addr)
+void _writeq(u64 b, unsigned long addr)
 {
 	__writeq(b, addr);
 	mb();
@@ -414,7 +414,7 @@ void _memcpy_fromio(void * to, unsigned long from, long count)
 	/* Optimize co-aligned transfers.  Everything else gets handled
 	   a byte at a time. */
 
-	if (count >= 8 && ((long)to & 7) == (from & 7)) {
+	if (count >= 8 && ((unsigned long)to & 7) == (from & 7)) {
 		count -= 8;
 		do {
 			*(u64 *)to = __raw_readq(from);
@@ -425,7 +425,7 @@ void _memcpy_fromio(void * to, unsigned long from, long count)
 		count += 8;
 	}
 
-	if (count >= 4 && ((long)to & 3) == (from & 3)) {
+	if (count >= 4 && ((unsigned long)to & 3) == (from & 3)) {
 		count -= 4;
 		do {
 			*(u32 *)to = __raw_readl(from);
@@ -436,7 +436,7 @@ void _memcpy_fromio(void * to, unsigned long from, long count)
 		count += 4;
 	}
 		
-	if (count >= 2 && ((long)to & 1) == (from & 1)) {
+	if (count >= 2 && ((unsigned long)to & 1) == (from & 1)) {
 		count -= 2;
 		do {
 			*(u16 *)to = __raw_readw(from);
@@ -465,7 +465,7 @@ void _memcpy_toio(unsigned long to, const void * from, long count)
 	   a byte at a time. */
 	/* FIXME -- align FROM.  */
 
-	if (count >= 8 && (to & 7) == ((long)from & 7)) {
+	if (count >= 8 && (to & 7) == ((unsigned long)from & 7)) {
 		count -= 8;
 		do {
 			__raw_writeq(*(const u64 *)from, to);
@@ -476,7 +476,7 @@ void _memcpy_toio(unsigned long to, const void * from, long count)
 		count += 8;
 	}
 
-	if (count >= 4 && (to & 3) == ((long)from & 3)) {
+	if (count >= 4 && (to & 3) == ((unsigned long)from & 3)) {
 		count -= 4;
 		do {
 			__raw_writel(*(const u32 *)from, to);
@@ -487,7 +487,7 @@ void _memcpy_toio(unsigned long to, const void * from, long count)
 		count += 4;
 	}
 		
-	if (count >= 2 && (to & 1) == ((long)from & 1)) {
+	if (count >= 2 && (to & 1) == ((unsigned long)from & 1)) {
 		count -= 2;
 		do {
 			__raw_writew(*(const u16 *)from, to);

@@ -33,17 +33,9 @@
 #define pgd_ERROR(e) \
 	printk("%s:%d: bad pgd %p(%016Lx).\n", __FILE__, __LINE__, &(e), pgd_val(e))
 
-/*
- * Subtle, in PAE mode we cannot have zeroes in the top level
- * page directory, the CPU enforces this. (ie. the PGD entry
- * always has to have the present bit set.) The CPU caches
- * the 4 pgd entries internally, so there is no extra memory
- * load on TLB miss, despite one more level of indirection.
- */
-#define EMPTY_PGD (__pa(empty_zero_page) + 1)
-#define pgd_none(x)	(pgd_val(x) == EMPTY_PGD)
-extern inline int pgd_bad(pgd_t pgd)		{ return 0; }
-extern inline int pgd_present(pgd_t pgd)	{ return !pgd_none(pgd); }
+static inline int pgd_none(pgd_t pgd)		{ return 0; }
+static inline int pgd_bad(pgd_t pgd)		{ return 0; }
+static inline int pgd_present(pgd_t pgd)	{ return 1; }
 
 /* Rules for using set_pte: the pte being assigned *must* be
  * either not present or in a state where the hardware will
@@ -57,34 +49,27 @@ static inline void set_pte(pte_t *ptep, pte_t pte)
 	smp_wmb();
 	ptep->pte_low = pte.pte_low;
 }
+#define set_pte_atomic(pteptr,pteval) \
+		set_64bit((unsigned long long *)(pteptr),pte_val(pteval))
 #define set_pmd(pmdptr,pmdval) \
 		set_64bit((unsigned long long *)(pmdptr),pmd_val(pmdval))
 #define set_pgd(pgdptr,pgdval) \
 		set_64bit((unsigned long long *)(pgdptr),pgd_val(pgdval))
 
 /*
- * Pentium-II errata A13: in PAE mode we explicitly have to flush
- * the TLB via cr3 if the top-level pgd is changed... This was one tough
- * thing to find out - guess i should first read all the documentation
- * next time around ;)
+ * Pentium-II erratum A13: in PAE mode we explicitly have to flush
+ * the TLB via cr3 if the top-level pgd is changed...
+ * We do not let the generic code free and clear pgd entries due to
+ * this erratum.
  */
-extern inline void __pgd_clear (pgd_t * pgd)
-{
-	set_pgd(pgd, __pgd(EMPTY_PGD));
-}
-
-extern inline void pgd_clear (pgd_t * pgd)
-{
-	__pgd_clear(pgd);
-	__flush_tlb();
-}
+static inline void pgd_clear (pgd_t * pgd) { }
 
 #define pgd_page(pgd) \
 ((unsigned long) __va(pgd_val(pgd) & PAGE_MASK))
 
 /* Find an entry in the second-level page table.. */
 #define pmd_offset(dir, address) ((pmd_t *) pgd_page(*(dir)) + \
-			__pmd_offset(address))
+			pmd_index(address))
 
 static inline pte_t ptep_get_and_clear(pte_t *ptep)
 {
@@ -103,10 +88,20 @@ static inline int pte_same(pte_t a, pte_t b)
 	return a.pte_low == b.pte_low && a.pte_high == b.pte_high;
 }
 
-#define pte_page(x)	(mem_map+(((x).pte_low >> PAGE_SHIFT) | ((x).pte_high << (32 - PAGE_SHIFT))))
-#define pte_none(x)	(!(x).pte_low && !(x).pte_high)
+#define pte_page(x)	pfn_to_page(pte_pfn(x))
 
-static inline pte_t __mk_pte(unsigned long page_nr, pgprot_t pgprot)
+static inline int pte_none(pte_t pte)
+{
+	return !pte.pte_low && !pte.pte_high;
+}
+
+static inline unsigned long pte_pfn(pte_t pte)
+{
+	return (pte.pte_low >> PAGE_SHIFT) |
+		(pte.pte_high << (32 - PAGE_SHIFT));
+}
+
+static inline pte_t pfn_pte(unsigned long page_nr, pgprot_t pgprot)
 {
 	pte_t pte;
 
@@ -114,5 +109,18 @@ static inline pte_t __mk_pte(unsigned long page_nr, pgprot_t pgprot)
 	pte.pte_low = (page_nr << PAGE_SHIFT) | pgprot_val(pgprot);
 	return pte;
 }
+
+static inline pmd_t pfn_pmd(unsigned long page_nr, pgprot_t pgprot)
+{
+	return __pmd(((unsigned long long)page_nr << PAGE_SHIFT) | pgprot_val(pgprot));
+}
+
+/*
+ * Bits 0, 6 and 7 are taken in the low part of the pte,
+ * put the 32 bits of offset into the high part.
+ */
+#define pte_to_pgoff(pte) ((pte).pte_high)
+#define pgoff_to_pte(off) ((pte_t) { _PAGE_FILE, (off) })
+#define PTE_FILE_MAX_BITS       32
 
 #endif /* _I386_PGTABLE_3LEVEL_H */

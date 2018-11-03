@@ -14,7 +14,7 @@
   * Matt Thomas (matt@3am-software.com).
   *
   * This software may be used and distributed according to the terms
-  * of the GNU Public License version 2, incorporated herein by reference.
+  * of the GNU General Public License version 2, incorporated herein by reference.
   */
 
 #include <linux/timer.h>
@@ -48,9 +48,6 @@ typedef struct lmc___ctl lmc_ctl_t;
 #define u_int16_t	u16
 #define u_int8_t	u8
 #define tulip_uint32_t	u32
-#if LINUX_VERSION_CODE < 0x20155
-#define u_int32_t	u32
-#endif
 
 #define LMC_REG_RANGE 0x80
 
@@ -87,7 +84,7 @@ typedef struct lmc___ctl lmc_ctl_t;
 		lmc_delay(); \
 		LMC_CSR_WRITE((sc), csr_9, 0x30000); \
                 lmc_delay(); \
-		n--; }} while(0);
+		n--; }} while(0)
 
 struct lmc_regfile_t {
     lmc_csrptr_t csr_busmode;                  /* CSR0 */
@@ -410,9 +407,7 @@ struct lmc___softc {
         u32                     last_int;
         u32                     num_int;
 
-#if LINUX_VERSION_CODE >= 0x20200
 	spinlock_t              lmc_lock;
-#endif
         u_int16_t               if_type;       /* PPP or NET */
         struct ppp_device       *pd;
 
@@ -482,10 +477,10 @@ struct lmc___softc {
 
 #define TULIP_STS_NORMALINTR    0x00010000L /* (RW)  Normal Interrupt */
 #define TULIP_STS_ABNRMLINTR    0x00008000L /* (RW)  Abnormal Interrupt */
-#define TULIP_STS_ERI           0x00004000L /* (RW)  Early Receive Interupt */
+#define TULIP_STS_ERI           0x00004000L /* (RW)  Early Receive Interrupt */
 #define TULIP_STS_SYSERROR      0x00002000L /* (RW)  System Error */
 #define TULIP_STS_GTE           0x00000800L /* (RW)  General Pupose Timer Exp */
-#define TULIP_STS_ETI           0x00000400L /* (RW)  Early Transmit Interupt */
+#define TULIP_STS_ETI           0x00000400L /* (RW)  Early Transmit Interrupt */
 #define TULIP_STS_RXWT          0x00000200L /* (RW)  Receiver Watchdog Timeout */
 #define TULIP_STS_RXSTOPPED     0x00000100L /* (RW)  Receiver Process Stopped */
 #define TULIP_STS_RXNOBUF       0x00000080L /* (RW)  Receive Buf Unavail */
@@ -549,10 +544,6 @@ struct lmc___softc {
 
 #define LMC_CRC_LEN_16 2  /* 16-bit CRC */
 #define LMC_CRC_LEN_32 4
-
-#if LINUX_VERSION_CODE < 0x20100
-#define test_and_set_bit(val, addr) set_bit(val, addr)
-#endif
 
 #ifdef LMC_HDLC
 /* definition of an hdlc header. */

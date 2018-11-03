@@ -9,6 +9,10 @@
 #include <linux/netfilter_ipv6/ip6t_multiport.h>
 #include <linux/netfilter_ipv6/ip6_tables.h>
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+MODULE_DESCRIPTION("ip6tables match for multiple ports");
+
 #if 0
 #define duprintf(format, args...) printk(format , ## args)
 #else
@@ -51,7 +55,7 @@ match(const struct sk_buff *skb,
 	if (offset == 0 && datalen < sizeof(struct udphdr)) {
 		/* We've been asked to examine this packet, and we
 		   can't.  Hence, no choice but to drop. */
-			duprintf("ipt_multiport:"
+			duprintf("ip6t_multiport:"
 				 " Dropping evil offset=0 tinygram.\n");
 			*hotdrop = 1;
 			return 0;
@@ -84,8 +88,12 @@ checkentry(const char *tablename,
 		&& multiinfo->count <= IP6T_MULTI_PORTS;
 }
 
-static struct ip6t_match multiport_match
-= { { NULL, NULL }, "multiport", &match, &checkentry, NULL, THIS_MODULE };
+static struct ip6t_match multiport_match = {
+	.name		= "multiport",
+	.match		= &match,
+	.checkentry	= &checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {

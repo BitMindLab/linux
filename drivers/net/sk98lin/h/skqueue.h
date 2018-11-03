@@ -1,17 +1,17 @@
 /******************************************************************************
  *
  * Name:	skqueue.h
- * Project:	GEnesis, PCI Gigabit Ethernet Adapter
- * Version:	$Revision: 1.13 $
- * Date:	$Date: 1999/11/22 13:59:05 $
+ * Project:	Gigabit Ethernet Adapters, Schedule-Modul
+ * Version:	$Revision: 1.15 $
+ * Date:	$Date: 2003/05/13 17:54:57 $
  * Purpose:	Defines for the Event queue
  *
  ******************************************************************************/
 
 /******************************************************************************
  *
- *	(C)Copyright 1998,1999 SysKonnect,
- *	a business unit of Schneider & Koch & Co. Datensysteme GmbH.
+ *	(C)Copyright 1998-2002 SysKonnect GmbH.
+ *	(C)Copyright 2002-2003 Marvell.
  *
  *	This program is free software; you can redistribute it and/or modify
  *	it under the terms of the GNU General Public License as published by
@@ -27,6 +27,12 @@
  * History:
  *
  *	$Log: skqueue.h,v $
+ *	Revision 1.15  2003/05/13 17:54:57  mkarl
+ *	Editorial changes.
+ *	
+ *	Revision 1.14  2002/03/15 10:52:13  mkunz
+ *	Added event classes for link aggregation
+ *	
  *	Revision 1.13  1999/11/22 13:59:05  cgoos
  *	Changed license header to GPL.
  *	
@@ -90,6 +96,12 @@
 #define	SKGE_PNMI	4	/* PNMI Event Class */
 #define	SKGE_CSUM	5	/* Checksum Event Class */
 #define	SKGE_HWAC	6	/* Hardware Access Event Class */
+
+#define	SKGE_SWT	9	/* Software Timer Event Class */
+#define	SKGE_LACP	10	/* LACP Aggregation Event Class */
+#define	SKGE_RSF	11	/* RSF Aggregation Event Class */
+#define	SKGE_MARKER	12	/* MARKER Aggregation Event Class */
+#define	SKGE_FD		13	/* FD Distributor Event Class */
 
 /*
  * define event queue as circular buffer

@@ -1,13 +1,16 @@
-/* $Id: isdnl1.c,v 2.41.6.1 2000/12/10 22:01:04 kai Exp $
+/* $Id: isdnl1.c,v 2.41.6.5 2001/09/23 22:24:49 kai Exp $
  *
- * isdnl1.c     common low level stuff for Siemens Chipsetbased isdn cards
+ * common low level stuff for Siemens Chipsetbased isdn cards
+ *
+ * Author       Karsten Keil
  *              based on the teles driver from Jan den Ouden
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
- *
- *		This file is (c) under GNU PUBLIC LICENSE
- *		For changes and modifications please read
- *		../../../Documentation/isdn/HiSax.cert
+ * For changes and modifications please read
+ * ../../../Documentation/isdn/HiSax.cert
  *
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
@@ -15,9 +18,8 @@
  *
  */
 
-const char *l1_revision = "$Revision: 2.41.6.1 $";
+const char *l1_revision = "$Revision: 2.41.6.5 $";
 
-#define __NO_VERSION__
 #include <linux/init.h>
 #include "hisax.h"
 #include "isdnl1.h"
@@ -124,7 +126,7 @@ static char *strL1Event[] =
 };
 
 void
-debugl1(struct IsdnCardState *cs, char *fmt, ...)
+debugl1(struct IsdnCardState *cs, const char *fmt, ...)
 {
 	va_list args;
 	char tmp[8];
@@ -157,9 +159,9 @@ L1activated(struct IsdnCardState *cs)
 	st = cs->stlist;
 	while (st) {
 		if (test_and_clear_bit(FLG_L1_ACTIVATING, &st->l1.Flags))
-			st->l1.l1l2(st, PH_ACTIVATE | CONFIRM, NULL);
+			L1L2(st, PH_ACTIVATE | CONFIRM, NULL);
 		else
-			st->l1.l1l2(st, PH_ACTIVATE | INDICATION, NULL);
+			L1L2(st, PH_ACTIVATE | INDICATION, NULL);
 		st = st->next;
 	}
 }
@@ -172,8 +174,8 @@ L1deactivated(struct IsdnCardState *cs)
 	st = cs->stlist;
 	while (st) {
 		if (test_bit(FLG_L1_DBUSY, &cs->HW_Flags))
-			st->l1.l1l2(st, PH_PAUSE | CONFIRM, NULL);
-		st->l1.l1l2(st, PH_DEACTIVATE | INDICATION, NULL);
+			L1L2(st, PH_PAUSE | CONFIRM, NULL);
+		L1L2(st, PH_DEACTIVATE | INDICATION, NULL);
 		st = st->next;
 	}
 	test_and_clear_bit(FLG_L1_DBUSY, &cs->HW_Flags);
@@ -190,7 +192,7 @@ DChannel_proc_xmt(struct IsdnCardState *cs)
 	stptr = cs->stlist;
 	while (stptr != NULL)
 		if (test_and_clear_bit(FLG_L1_PULL_REQ, &stptr->l1.Flags)) {
-			stptr->l1.l1l2(stptr, PH_PULL | CONFIRM, NULL);
+			L1L2(stptr, PH_PULL | CONFIRM, NULL);
 			break;
 		} else
 			stptr = stptr->next;
@@ -232,7 +234,7 @@ DChannel_proc_rcv(struct IsdnCardState *cs)
 			if (sapi == CTRL_SAPI) { /* sapi 0 */
 				while (stptr != NULL) {
 					if ((nskb = skb_clone(skb, GFP_ATOMIC)))
-						stptr->l1.l1l2(stptr, PH_DATA | INDICATION, nskb);
+						L1L2(stptr, PH_DATA | INDICATION, nskb);
 					else
 						printk(KERN_WARNING "HiSax: isdn broadcast buffer shortage\n");
 					stptr = stptr->next;
@@ -251,7 +253,7 @@ DChannel_proc_rcv(struct IsdnCardState *cs)
 			found = 0;
 			while (stptr != NULL)
 				if (tei == stptr->l2.tei) {
-					stptr->l1.l1l2(stptr, PH_DATA | INDICATION, skb);
+					L1L2(stptr, PH_DATA | INDICATION, skb);
 					found = !0;
 					break;
 				} else
@@ -274,10 +276,10 @@ BChannel_proc_xmt(struct BCState *bcs)
 	}
 
 	if (test_and_clear_bit(FLG_L1_PULL_REQ, &st->l1.Flags))
-		st->l1.l1l2(st, PH_PULL | CONFIRM, NULL);
+		L1L2(st, PH_PULL | CONFIRM, NULL);
 	if (!test_bit(BC_FLG_ACTIV, &bcs->Flag)) {
 		if (!test_bit(BC_FLG_BUSY, &bcs->Flag) && (!skb_queue_len(&bcs->squeue))) {
-			st->l2.l2l1(st, PH_DEACTIVATE | CONFIRM, NULL);
+			L2L1(st, PH_DEACTIVATE | CONFIRM, NULL);
 		}
 	}
 }
@@ -292,19 +294,31 @@ BChannel_proc_rcv(struct BCState *bcs)
 		FsmEvent(&bcs->st->l1.l1m, EV_TIMER_ACT, NULL);
 	}
 	while ((skb = skb_dequeue(&bcs->rqueue))) {
-		bcs->st->l1.l1l2(bcs->st, PH_DATA | INDICATION, skb);
+		L1L2(bcs->st, PH_DATA | INDICATION, skb);
+	}
+}
+
+static void
+BChannel_proc_cmpl(struct BCState *bcs)
+{
+	struct sk_buff *skb;
+
+	while ((skb = skb_dequeue(&bcs->cmpl_queue))) {
+		L1L2(bcs->st, PH_DATA | CONFIRM, skb);
 	}
 }
 
 void
-BChannel_bh(struct BCState *bcs)
+BChannel_bh(void *data)
 {
-	if (!bcs)
-		return;
+	struct BCState *bcs = data;
+
 	if (test_and_clear_bit(B_RCVBUFREADY, &bcs->event))
 		BChannel_proc_rcv(bcs);
 	if (test_and_clear_bit(B_XMTBUFREADY, &bcs->event))
 		BChannel_proc_xmt(bcs);
+	if (test_and_clear_bit(B_CMPLREADY, &bcs->event))
+		BChannel_proc_cmpl(bcs);
 }
 
 void
@@ -343,18 +357,14 @@ init_bcstate(struct IsdnCardState *cs,
 
 	bcs->cs = cs;
 	bcs->channel = bc;
-	bcs->tqueue.sync = 0;
-	bcs->tqueue.routine = (void *) (void *) BChannel_bh;
-	bcs->tqueue.data = bcs;
-	bcs->BC_SetStack = NULL;
-	bcs->BC_Close = NULL;
+	INIT_WORK(&bcs->work, BChannel_bh, bcs);
 	bcs->Flag = 0;
 }
 
 #ifdef L2FRAME_DEBUG		/* psa */
 
 char *
-l2cmd(u_char cmd)
+l2cmd(u8 cmd)
 {
 	switch (cmd & ~0x10) {
 		case 1:
@@ -388,7 +398,7 @@ l2cmd(u_char cmd)
 static char tmpdeb[32];
 
 char *
-l2frames(u_char * ptr)
+l2frames(u8 * ptr)
 {
 	switch (ptr[2] & ~0x10) {
 		case 1:
@@ -420,7 +430,7 @@ l2frames(u_char * ptr)
 void
 Logl2Frame(struct IsdnCardState *cs, struct sk_buff *skb, char *buf, int dir)
 {
-	u_char *ptr;
+	u8 *ptr;
 
 	ptr = skb->data;
 
@@ -714,7 +724,7 @@ l1b_timer_act(struct FsmInst *fi, int event, void *arg)
 	struct PStack *st = fi->userdata;
 
 	FsmChangeState(fi, ST_L1_ACTIV);
-	st->l1.l1l2(st, PH_ACTIVATE | CONFIRM, NULL);
+	L1L2(st, PH_ACTIVATE | CONFIRM, NULL);
 }
 
 static void
@@ -723,7 +733,7 @@ l1b_timer_deact(struct FsmInst *fi, int event, void *arg)
 	struct PStack *st = fi->userdata;
 
 	FsmChangeState(fi, ST_L1_NULL);
-	st->l2.l2l1(st, PH_DEACTIVATE | CONFIRM, NULL);
+	L2L1(st, PH_DEACTIVATE | CONFIRM, NULL);
 }
 
 static struct FsmNode L1BFnList[] __initdata =
@@ -736,26 +746,41 @@ static struct FsmNode L1BFnList[] __initdata =
 
 #define L1B_FN_COUNT (sizeof(L1BFnList)/sizeof(struct FsmNode))
 
-void __init 
+int __init 
 Isdnl1New(void)
 {
+	int retval;
+
+	l1fsm_s.state_count = L1S_STATE_COUNT;
+	l1fsm_s.event_count = L1_EVENT_COUNT;
+	l1fsm_s.strEvent = strL1Event;
+	l1fsm_s.strState = strL1SState;
+	retval = FsmNew(&l1fsm_s, L1SFnList, L1S_FN_COUNT);
+	if (retval)
+		return retval;
+
+	l1fsm_b.state_count = L1B_STATE_COUNT;
+	l1fsm_b.event_count = L1_EVENT_COUNT;
+	l1fsm_b.strEvent = strL1Event;
+	l1fsm_b.strState = strL1BState;
+	retval = FsmNew(&l1fsm_b, L1BFnList, L1B_FN_COUNT);
+	if (retval) {
+		FsmFree(&l1fsm_s);
+		return retval;
+	}
 #ifdef HISAX_UINTERFACE
 	l1fsm_u.state_count = L1U_STATE_COUNT;
 	l1fsm_u.event_count = L1_EVENT_COUNT;
 	l1fsm_u.strEvent = strL1Event;
 	l1fsm_u.strState = strL1UState;
-	FsmNew(&l1fsm_u, L1UFnList, L1U_FN_COUNT);
+	retval = FsmNew(&l1fsm_u, L1UFnList, L1U_FN_COUNT);
+	if (retval) {
+		FsmFree(&l1fsm_s);
+		FsmFree(&l1fsm_b);
+		return retval;
+	}
 #endif
-	l1fsm_s.state_count = L1S_STATE_COUNT;
-	l1fsm_s.event_count = L1_EVENT_COUNT;
-	l1fsm_s.strEvent = strL1Event;
-	l1fsm_s.strState = strL1SState;
-	FsmNew(&l1fsm_s, L1SFnList, L1S_FN_COUNT);
-	l1fsm_b.state_count = L1B_STATE_COUNT;
-	l1fsm_b.event_count = L1_EVENT_COUNT;
-	l1fsm_b.strEvent = strL1Event;
-	l1fsm_b.strState = strL1BState;
-	FsmNew(&l1fsm_b, L1BFnList, L1B_FN_COUNT);
+	return 0;
 }
 
 void Isdnl1Free(void)
@@ -783,7 +808,7 @@ dch_l2l1(struct PStack *st, int pr, void *arg)
 				debugl1(cs, "PH_ACTIVATE_REQ %s",
 					st->l1.l1m.fsm->strState[st->l1.l1m.state]);
 			if (test_bit(FLG_L1_ACTIVATED, &st->l1.Flags))
-				st->l1.l1l2(st, PH_ACTIVATE | CONFIRM, NULL);
+				L1L2(st, PH_ACTIVATE | CONFIRM, NULL);
 			else {
 				test_and_set_bit(FLG_L1_ACTIVATING, &st->l1.Flags);
 				FsmEvent(&st->l1.l1m, EV_PH_ACTIVATE, arg);
@@ -879,8 +904,19 @@ setstack_HiSax(struct PStack *st, struct IsdnCardState *cs)
 	setstack_tei(st);
 	setstack_manager(st);
 	st->l1.stlistp = &(cs->stlist);
-	st->l2.l2l1  = dch_l2l1;
-	cs->setstack_d(st, cs);
+	st->l1.l2l1  = dch_l2l1;
+	if (cs->dc_l1_ops->open)
+		cs->dc_l1_ops->open(st, cs);
+}
+
+void
+dc_l1_init(struct IsdnCardState *cs, struct dc_l1_ops *ops)
+{
+	cs->dc_l1_ops = ops;
+	INIT_WORK(&cs->work, ops->bh_func, cs);
+	init_timer(&cs->dbusytimer);
+	cs->dbusytimer.function = (void *)(unsigned long) ops->dbusy_func;
+	cs->dbusytimer.data = (unsigned long) cs;
 }
 
 void

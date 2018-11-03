@@ -7,7 +7,7 @@
 #include <linux/string.h>
 #include <linux/pci.h>
 
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 
 #include <asm/uaccess.h>
@@ -128,11 +128,11 @@ kernel_set_cachemode(unsigned long vaddr, unsigned long size, int what)
 	switch (what) {
 	case IOMAP_FULL_CACHING:
 		iterate_pages(vaddr, size, set_cached, 0);
-		flush_tlb_range(&init_mm, vaddr, size);
+		flush_tlb_range(NULL, vaddr, size);
 		break;
 	case IOMAP_NOCACHE_SER:
 		iterate_pages(vaddr, size, set_uncached, 0);
-		flush_tlb_range(&init_mm, vaddr, size);
+		flush_tlb_range(NULL, vaddr, size);
 		break;
 	default:
 		printk(KERN_CRIT

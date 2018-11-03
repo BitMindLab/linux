@@ -148,20 +148,16 @@ struct	isi_port {
 	unsigned short		channel;
 	unsigned short		status;
 	unsigned short		closing_wait;
-	long 			session;
-	long			pgrp;
 	struct isi_board	* card;
 	struct tty_struct 	* tty;
 	wait_queue_head_t	close_wait;
 	wait_queue_head_t	open_wait;
-	struct tq_struct	hangup_tq;
-	struct tq_struct	bh_tqueue;
+	struct work_struct	hangup_tq;
+	struct work_struct	bh_tqueue;
 	unsigned char		* xmit_buf;
 	int			xmit_head;
 	int			xmit_tail;
 	int			xmit_cnt;
-	struct termios 		normal_termios;
-	struct termios		callout_termios;
 };
 
 
@@ -169,7 +165,7 @@ struct	isi_port {
  *  ISI Card specific ops ...
  */
  
-extern inline void raise_dtr(struct isi_port * port)
+static inline void raise_dtr(struct isi_port * port)
 {
 	struct isi_board * card = port->card;
 	unsigned short base = card->base;
@@ -189,7 +185,7 @@ extern inline void raise_dtr(struct isi_port * port)
 	port->status |= ISI_DTR;
 }
 
-extern inline void drop_dtr(struct isi_port * port)
+static inline void drop_dtr(struct isi_port * port)
 {	
 	struct isi_board * card = port->card;
 	unsigned short base = card->base;
@@ -208,7 +204,7 @@ extern inline void drop_dtr(struct isi_port * port)
 	InterruptTheCard(base);	
 	port->status &= ~ISI_DTR;
 }
-extern inline void raise_rts(struct isi_port * port)
+static inline void raise_rts(struct isi_port * port)
 {
 	struct isi_board * card = port->card;
 	unsigned short base = card->base;
@@ -227,7 +223,7 @@ extern inline void raise_rts(struct isi_port * port)
 	InterruptTheCard(base);	
 	port->status |= ISI_RTS;
 }
-extern inline void drop_rts(struct isi_port * port)
+static inline void drop_rts(struct isi_port * port)
 {
 	struct isi_board * card = port->card;
 	unsigned short base = card->base;
@@ -246,7 +242,7 @@ extern inline void drop_rts(struct isi_port * port)
 	InterruptTheCard(base);	
 	port->status &= ~ISI_RTS;
 }
-extern inline void raise_dtr_rts(struct isi_port * port)
+static inline void raise_dtr_rts(struct isi_port * port)
 {
 	struct isi_board * card = port->card;
 	unsigned short base = card->base;
@@ -265,7 +261,7 @@ extern inline void raise_dtr_rts(struct isi_port * port)
 	InterruptTheCard(base);
 	port->status |= (ISI_DTR | ISI_RTS);
 }
-extern inline void drop_dtr_rts(struct isi_port * port)
+static inline void drop_dtr_rts(struct isi_port * port)
 {
 	struct isi_board * card = port->card;
 	unsigned short base = card->base;
@@ -285,7 +281,7 @@ extern inline void drop_dtr_rts(struct isi_port * port)
 	port->status &= ~(ISI_RTS | ISI_DTR);
 }
 
-extern inline void kill_queue(struct isi_port * port, short queue)
+static inline void kill_queue(struct isi_port * port, short queue)
 {
 	struct isi_board * card = port->card;
 	unsigned short base = card->base;

@@ -22,6 +22,7 @@
 
 #include <linux/types.h>
 #include <asm/bootinfo.h>
+#include <asm/raw_io.h>
 
 extern u_long atari_mch_cookie;
 extern u_long atari_mch_type;
@@ -122,8 +123,17 @@ extern struct atari_hw_present atari_hw_present;
  * DMA reads (i.e., writes to memory).
  */
 
+
+#define atari_readb   raw_inb
+#define atari_writeb  raw_outb
+
+#define atari_inb_p   raw_inb
+#define atari_outb_p  raw_outb
+
+
+
 #include <linux/mm.h>
-#include <asm/pgalloc.h>
+#include <asm/cacheflush.h>
 
 static inline void dma_cache_maintenance( unsigned long paddr,
 					  unsigned long len,

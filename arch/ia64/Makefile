@@ -5,131 +5,104 @@
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 1998-2000 by David Mosberger-Tang <davidm@hpl.hp.com>
+# Copyright (C) 1998-2003 by David Mosberger-Tang <davidm@hpl.hp.com>
 #
 
 NM := $(CROSS_COMPILE)nm -B
-AWK := awk
 
 export AWK
 
-LINKFLAGS = -static -T arch/$(ARCH)/vmlinux.lds
-AFLAGS += -Wa,-x 
-AFLAGS_KERNEL := -mconstant-gp
-EXTRA	=
+OBJCOPYFLAGS	:= --strip-all
+LDFLAGS_vmlinux	:= -static
+LDFLAGS_MODULE	+= -T arch/ia64/module.lds
+AFLAGS_KERNEL	:= -mconstant-gp
+EXTRA		:=
 
-CFLAGS := $(CFLAGS) -pipe $(EXTRA) -Wa,-x -ffixed-r13 -mfixed-range=f10-f15,f32-f127 \
-	  -funwind-tables -falign-functions=32
-# -frename-registers
-CFLAGS_KERNEL := -mconstant-gp
+cflags-y	:= -pipe $(EXTRA) -ffixed-r13 -mfixed-range=f12-f15,f32-f127 \
+		   -falign-functions=32 -frename-registers
+CFLAGS_KERNEL	:= -mconstant-gp
 
-ifeq ($(CONFIG_ITANIUM_ASTEP_SPECIFIC),y)
-	CFLAGS += -ma-step
-endif
-ifeq ($(CONFIG_ITANIUM_BSTEP_SPECIFIC),y)
-	CFLAGS += -mb-step
-endif
+GCC_VERSION=$(shell $(CC) -v 2>&1 | fgrep 'gcc version' | cut -f3 -d' ' | cut -f1 -d'.')
+GCC_MINOR_VERSION=$(shell $(CC) -v 2>&1 | fgrep 'gcc version' | cut -f3 -d' ' | cut -f2 -d'.')
 
-ifdef CONFIG_IA64_GENERIC
-	CORE_FILES      :=      arch/$(ARCH)/hp/hp.a	\
-				arch/$(ARCH)/sn/sn.a	\
-				arch/$(ARCH)/dig/dig.a	\
-				arch/$(ARCH)/sn/io/sgiio.o \
-				$(CORE_FILES)
-	SUBDIRS		:=	arch/$(ARCH)/hp		\
-				arch/$(ARCH)/sn/sn1	\
-				arch/$(ARCH)/sn		\
-				arch/$(ARCH)/dig	\
-				arch/$(ARCH)/sn/io	\
-				$(SUBDIRS)
+GAS_STATUS=$(shell arch/ia64/scripts/check-gas $(CC) $(OBJDUMP))
 
-else # !GENERIC
+CPPFLAGS	+= $(shell arch/ia64/scripts/toolchain-flags $(CC) $(OBJDUMP))
 
-ifdef CONFIG_IA64_HP_SIM
-        SUBDIRS         :=      arch/$(ARCH)/hp		\
-                                $(SUBDIRS)
-        CORE_FILES      :=      arch/$(ARCH)/hp/hp.a	\
-                                $(CORE_FILES)
+ifeq ($(GAS_STATUS),buggy)
+$(error Sorry, you need a newer version of the assember, one that is built from	\
+	a source-tree that post-dates 18-Dec-2002.  You can find a pre-compiled	\
+	static binary of such an assembler at:					\
+										\
+		ftp://ftp.hpl.hp.com/pub/linux-ia64/gas-030124.tar.gz)
 endif
 
-ifdef CONFIG_IA64_SGI_SN1
-CFLAGS += -DBRINGUP
-        SUBDIRS         :=      arch/$(ARCH)/sn/sn1	\
-				arch/$(ARCH)/sn		\
-				arch/$(ARCH)/sn/io	\
-				arch/$(ARCH)/sn/fprom	\
-				$(SUBDIRS)
-        CORE_FILES      :=      arch/$(ARCH)/sn/sn.a	\
-				arch/$(ARCH)/sn/io/sgiio.o\
-				$(CORE_FILES)
+ifeq ($(GCC_VERSION),2)
+$(error Sorry, your compiler is too old.  GCC v2.96 is known to generate bad code.)
 endif
 
-ifdef CONFIG_IA64_SOFTSDV
-        SUBDIRS         :=      arch/$(ARCH)/dig	\
-				$(SUBDIRS)
-        CORE_FILES      :=      arch/$(ARCH)/dig/dig.a	\
-				$(CORE_FILES)
+ifeq ($(GCC_VERSION),3)
+ ifeq ($(GCC_MINOR_VERSION),4)
+	cflags-$(CONFIG_ITANIUM)	+= -mtune=merced
+	cflags-$(CONFIG_MCKINLEY)	+= -mtune=mckinley
+ endif
 endif
 
-ifdef CONFIG_IA64_DIG
-        SUBDIRS         :=      arch/$(ARCH)/dig	\
-				$(SUBDIRS)
-        CORE_FILES      :=      arch/$(ARCH)/dig/dig.a	\
-				$(CORE_FILES)
-endif
+cflags-$(CONFIG_ITANIUM_BSTEP_SPECIFIC)	+= -mb-step
 
-endif # !GENERIC
+CFLAGS += $(cflags-y)
+head-y := arch/ia64/kernel/head.o arch/ia64/kernel/init_task.o
 
-ifdef CONFIG_IA32_SUPPORT
-	SUBDIRS		:=	arch/$(ARCH)/ia32 $(SUBDIRS)
-	CORE_FILES	:=	arch/$(ARCH)/ia32/ia32.o $(CORE_FILES)
-endif
+libs-y				+= arch/ia64/lib/
+core-y				+= arch/ia64/kernel/ arch/ia64/mm/
+core-$(CONFIG_IA32_SUPPORT)	+= arch/ia64/ia32/
+core-$(CONFIG_IA64_DIG) 	+= arch/ia64/dig/
+core-$(CONFIG_IA64_GENERIC) 	+= arch/ia64/dig/
+core-$(CONFIG_IA64_HP_ZX1)	+= arch/ia64/dig/
+core-$(CONFIG_IA64_SGI_SN2)	+= arch/ia64/sn/
 
-HEAD := arch/$(ARCH)/kernel/head.o arch/ia64/kernel/init_task.o
+drivers-$(CONFIG_PCI)		+= arch/ia64/pci/
+drivers-$(CONFIG_IA64_HP_SIM)	+= arch/ia64/hp/sim/
+drivers-$(CONFIG_IA64_HP_ZX1)	+= arch/ia64/hp/common/ arch/ia64/hp/zx1/
+drivers-$(CONFIG_IA64_GENERIC)	+= arch/ia64/hp/common/ arch/ia64/hp/zx1/ arch/ia64/hp/sim/ arch/ia64/sn/
+drivers-$(CONFIG_OPROFILE)	+= arch/ia64/oprofile/
 
-SUBDIRS := arch/$(ARCH)/tools arch/$(ARCH)/kernel arch/$(ARCH)/mm arch/$(ARCH)/lib $(SUBDIRS)
-CORE_FILES := arch/$(ARCH)/kernel/kernel.o arch/$(ARCH)/mm/mm.o $(CORE_FILES)
+boot := arch/ia64/hp/sim/boot
 
-LIBS := $(TOPDIR)/arch/$(ARCH)/lib/lib.a $(LIBS) \
-	$(TOPDIR)/arch/$(ARCH)/lib/lib.a
+.PHONY: boot compressed check
 
-MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
+all: compressed
 
-vmlinux: arch/$(ARCH)/vmlinux.lds
+compressed: vmlinux.gz
 
-arch/$(ARCH)/vmlinux.lds: arch/$(ARCH)/vmlinux.lds.S FORCE
-	$(CPP) -D__ASSEMBLY__ -C -P -I$(HPATH) -I$(HPATH)/asm-$(ARCH) \
-		-traditional arch/$(ARCH)/vmlinux.lds.S > $@
+vmlinux.gz: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $@
 
-FORCE: ;
-
-rawboot:
-	@$(MAKEBOOT) rawboot
-
-#
-# My boot writes directly to a specific disk partition, I doubt most
-# people will want to do that without changes..
-#
-msb my-special-boot:
-	@$(MAKEBOOT) msb
-
-bootimage:
-	@$(MAKEBOOT) bootimage
-
-srmboot:
-	@$(MAKEBOOT) srmboot
+check: vmlinux
+	arch/ia64/scripts/unwcheck.sh $<
 
 archclean:
-	@$(MAKE) -C arch/$(ARCH)/kernel clean
-	@$(MAKE) -C arch/$(ARCH)/tools clean
-	@$(MAKEBOOT) clean
+	$(Q)$(MAKE) $(clean)=$(boot)
 
-archmrproper:
-	rm -f arch/$(ARCH)/vmlinux.lds
-	@$(MAKE) -C arch/$(ARCH)/tools mrproper
+CLEAN_FILES += include/asm-ia64/.offsets.h.stamp include/asm-ia64/offsets.h vmlinux.gz bootloader
 
-archdep:
-	@$(MAKEBOOT) dep
+prepare: include/asm-ia64/offsets.h
 
-bootpfile:
-	@$(MAKEBOOT) bootpfile
+include/asm-$(ARCH)/offsets.h: arch/$(ARCH)/kernel/asm-offsets.s
+	$(call filechk,gen-asm-offsets)
+
+arch/ia64/kernel/asm-offsets.s: include/asm-ia64/.offsets.h.stamp
+
+include/asm-ia64/.offsets.h.stamp:
+	[ -s include/asm-ia64/offsets.h ] \
+	 || echo "#define IA64_TASK_SIZE 0" > include/asm-ia64/offsets.h
+	touch $@
+
+boot:	lib/lib.a vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $@
+
+
+define archhelp
+  echo '* compressed	- Build compressed kernel image'
+  echo '  boot		- Build vmlinux and bootloader for Ski simulator'
+endef

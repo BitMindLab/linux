@@ -12,6 +12,9 @@
 #include <asm/btfixup.h>
 
 #ifndef __ASSEMBLY__
+
+#include <linux/cpumask.h>
+
 /* PROM provided per-processor information we need
  * to start them all up.
  */
@@ -48,9 +51,9 @@ extern unsigned long cpu_offset[NR_CPUS];
  *	Private routines/data
  */
  
-extern int smp_found_cpus;
 extern unsigned char boot_cpu_id;
 extern unsigned long cpu_present_map;
+#define cpu_online_map cpu_present_map
 
 typedef void (*smpfunc_t)(unsigned long, unsigned long, unsigned long,
 		       unsigned long, unsigned long);
@@ -66,8 +69,9 @@ void smp_callin(void);
 void smp_boot_cpus(void);
 void smp_store_cpu_info(int);
 
-int smp_bogo_info(char *buf);
-int smp_info(char *buf);
+struct seq_file;
+void smp_bogo_info(struct seq_file *);
+void smp_info(struct seq_file *);
 
 BTFIXUPDEF_CALL(void, smp_cross_call, smpfunc_t, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)
 BTFIXUPDEF_CALL(void, smp_message_pass, int, int, unsigned long, int)
@@ -168,9 +172,6 @@ extern __inline__ int hard_smp_processor_id(void)
 #endif
 
 #define smp_processor_id() hard_smp_processor_id()
-/* XXX We really need to implement this now.  -DaveM */
-extern __inline__ void smp_send_reschedule(int cpu) { }
-extern __inline__ void smp_send_stop(void) { }
 
 #endif /* !(__ASSEMBLY__) */
 
@@ -187,8 +188,6 @@ extern __inline__ void smp_send_stop(void) { }
 #define MBOX_IDLECPU          0xFC
 #define MBOX_IDLECPU2         0xFD
 #define MBOX_STOPCPU2         0xFE
-
-#define PROC_CHANGE_PENALTY     15
 
 #endif /* !(CONFIG_SMP) */
 

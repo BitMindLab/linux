@@ -37,15 +37,15 @@
 #define VERSION "0.73"
 
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/types.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
 #include <linux/if_arp.h>
 #include <linux/inetdevice.h>
 #include <linux/pkt_sched.h>
 #include <linux/init.h>
+
 #include <asm/uaccess.h>
 
 #include "comx.h"
@@ -53,7 +53,8 @@
 
 MODULE_AUTHOR("Author: Tivadar Szemethy <tiv@itc.hu>");
 MODULE_DESCRIPTION("Frame Relay protocol implementation for the COMX drivers"
-	"for Linux kernel 2.2.X");
+	"for Linux kernel 2.4.X");
+MODULE_LICENSE("GPL");
 
 #define	FRAD_UI		0x03
 #define	NLPID_IP	0xcc
@@ -213,6 +214,7 @@ static void fr_set_keepalive(struct net_device *dev, int keepa)
 		}
 		fr->keepa_freq = keepa;
 		fr->local_cnt = fr->remote_cnt = 0;
+		init_timer(&fr->keepa_timer);
 		fr->keepa_timer.expires = jiffies + HZ;
 		fr->keepa_timer.function = fr_keepalive_timerfun;
 		fr->keepa_timer.data = (unsigned long)dev;
@@ -503,11 +505,13 @@ static int fr_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	if (dev != fr->master) {
 		struct sk_buff *newskb=skb_clone(skb, GFP_ATOMIC);
+		if (!newskb)
+			return -ENOMEM;
 		newskb->dev=fr->master;
 		dev_queue_xmit(newskb);
-		dev_kfree_skb(skb);
-		ch->stats.tx_packets++;
 		ch->stats.tx_bytes += skb->len;
+		ch->stats.tx_packets++;
+		dev_kfree_skb(skb);
 	} else {
 		netif_stop_queue(dev);
 		for (; dir ; dir = dir->next) {
@@ -632,7 +636,7 @@ static int fr_read_proc(char *page, char **start, off_t off, int count,
 
 	*start = page + off;
 	if (count >= len - off) *eof = 1;
-	return ( min(count, len - off) );
+	return min_t(int, count, len - off);
 }
 
 static int fr_write_proc(struct file *file, const char *buffer, 
@@ -652,7 +656,10 @@ static int fr_write_proc(struct file *file, const char *buffer,
 		return -ENOMEM;
 	}
 
-	copy_from_user(page, buffer, count);
+	if (copy_from_user(page, buffer, count)) {
+		free_page((unsigned long)page);
+		return -EFAULT;
+	}
 	if (*(page + count - 1) == '\n') {
 		*(page + count - 1) = 0;
 	}
@@ -701,7 +708,7 @@ static int fr_write_proc(struct file *file, const char *buffer,
 	} else {
 		printk(KERN_ERR "comxfr_write_proc: internal error, filename %s\n", 
 			entry->name);
-		return -EBADF;
+		count = -EBADF;
 	}
 
 	free_page((unsigned long)page);
@@ -960,37 +967,30 @@ static int dlci_dump(struct net_device *dev)
 }
 
 static struct comx_protocol fr_master_protocol = {
-	"frad", 
-	VERSION,
-	ARPHRD_FRAD, 
-	fr_master_init, 
-	fr_exit, 
-	NULL 
+	.name		= "frad", 
+	.version	= VERSION,
+	.encap_type	= ARPHRD_FRAD, 
+	.line_init	= fr_master_init, 
+	.line_exit	= fr_exit, 
 };
 
 static struct comx_protocol fr_slave_protocol = {
-	"ietf-ip", 
-	VERSION,
-	ARPHRD_DLCI, 
-	fr_slave_init, 
-	fr_exit, 
-	NULL 
+	.name		= "ietf-ip", 
+	.version	= VERSION,
+	.encap_type	= ARPHRD_DLCI, 
+	.line_init	= fr_slave_init, 
+	.line_exit	= fr_exit, 
 };
 
 static struct comx_hardware fr_dlci = { 
-	"dlci", 
-	VERSION,
-	dlci_init, 
-	dlci_exit, 
-	dlci_dump, 
-	NULL 
+	.name		= "dlci", 
+	.version	= VERSION,
+	.hw_init	= dlci_init, 
+	.hw_exit	= dlci_exit, 
+	.hw_dump	= dlci_dump, 
 };
 
-#ifdef MODULE
-#define comx_proto_fr_init init_module
-#endif
-
-int __init comx_proto_fr_init(void)
+static int __init comx_proto_fr_init(void)
 {
 	int ret; 
 
@@ -1003,12 +1003,12 @@ int __init comx_proto_fr_init(void)
 	return comx_register_protocol(&fr_slave_protocol);
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit comx_proto_fr_exit(void)
 {
 	comx_unregister_hardware(fr_dlci.name);
 	comx_unregister_protocol(fr_master_protocol.name);
 	comx_unregister_protocol(fr_slave_protocol.name);
 }
-#endif /* MODULE */
 
+module_init(comx_proto_fr_init);
+module_exit(comx_proto_fr_exit);

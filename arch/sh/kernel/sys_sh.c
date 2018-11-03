@@ -43,6 +43,49 @@ asmlinkage int sys_pipe(unsigned long r4, unsigned long r5,
 	return error;
 }
 
+#if defined(CONFIG_CPU_SH4)
+/*
+ * To avoid cache alias, we map the shard page with same color.
+ */
+#define COLOUR_ALIGN(addr)	(((addr)+SHMLBA-1)&~(SHMLBA-1))
+
+unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr,
+	unsigned long len, unsigned long pgoff, unsigned long flags)
+{
+	struct vm_area_struct *vma;
+
+	if (flags & MAP_FIXED) {
+		/* We do not accept a shared mapping if it would violate
+		 * cache aliasing constraints.
+		 */
+		if ((flags & MAP_SHARED) && (addr & (SHMLBA - 1)))
+			return -EINVAL;
+		return addr;
+	}
+
+	if (len > TASK_SIZE)
+		return -ENOMEM;
+	if (!addr)
+		addr = TASK_UNMAPPED_BASE;
+
+	if (flags & MAP_PRIVATE)
+		addr = PAGE_ALIGN(addr);
+	else
+		addr = COLOUR_ALIGN(addr);
+
+	for (vma = find_vma(current->mm, addr); ; vma = vma->vm_next) {
+		/* At this point:  (!vma || addr < vma->vm_end). */
+		if (TASK_SIZE - len < addr)
+			return -ENOMEM;
+		if (!vma || addr + len <= vma->vm_start)
+			return addr;
+		addr = vma->vm_end;
+		if (!(flags & MAP_PRIVATE))
+			addr = COLOUR_ALIGN(addr);
+	}
+}
+#endif
+
 static inline long
 do_mmap2(unsigned long addr, unsigned long len, unsigned long prot, 
 	 unsigned long flags, int fd, unsigned long pgoff)
@@ -57,9 +100,9 @@ do_mmap2(unsigned long addr, unsigned long len, unsigned long prot,
 			goto out;
 	}
 
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	error = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 
 	if (file)
 		fput(file);
@@ -99,7 +142,12 @@ asmlinkage int sys_ipc(uint call, int first, int second,
 	if (call <= SEMCTL)
 		switch (call) {
 		case SEMOP:
-			return sys_semop (first, (struct sembuf *)ptr, second);
+			return sys_semtimedop(first, (struct sembuf *)ptr,
+					      second, NULL);
+		case SEMTIMEDOP:
+			return sys_semtimedop(first, (struct sembuf *)ptr,
+					      second,
+					      (const struct timespec *)fifth);
 		case SEMGET:
 			return sys_semget (first, second, third);
 		case SEMCTL: {
@@ -189,9 +237,18 @@ asmlinkage int sys_uname(struct old_utsname * name)
 	return err?-EFAULT:0;
 }
 
-asmlinkage int sys_pause(void)
+asmlinkage ssize_t sys_pread_wrapper(unsigned int fd, char * buf,
+			     size_t count, long dummy, loff_t pos)
 {
-	current->state = TASK_INTERRUPTIBLE;
-	schedule();
-	return -ERESTARTNOHAND;
+	extern asmlinkage ssize_t sys_pread64(unsigned int fd, char * buf,
+					size_t count, loff_t pos);
+	return sys_pread64(fd, buf, count, pos);
+}
+
+asmlinkage ssize_t sys_pwrite_wrapper(unsigned int fd, const char * buf,
+			      size_t count, long dummy, loff_t pos)
+{
+	extern asmlinkage ssize_t sys_pwrite64(unsigned int fd, const char * buf,
+					size_t count, loff_t pos);
+	return sys_pwrite64(fd, buf, count, pos);
 }

@@ -126,6 +126,8 @@ struct igmpmsg
  */
 
 #ifdef __KERNEL__
+#include <net/sock.h>
+
 extern int ip_mroute_setsockopt(struct sock *, int, char *, int);
 extern int ip_mroute_getsockopt(struct sock *, int, char *, int *);
 extern int ipmr_ioctl(struct sock *sk, int cmd, unsigned long arg);
@@ -215,8 +217,7 @@ struct pimreghdr
 	__u32	flags;
 };
 
-extern int pim_rcv(struct sk_buff * , unsigned short);
-extern int pim_rcv_v1(struct sk_buff * , unsigned short len);
+extern int pim_rcv_v1(struct sk_buff *);
 
 struct rtmsg;
 extern int ipmr_get_route(struct sk_buff *skb, struct rtmsg *rtm, int nowait);

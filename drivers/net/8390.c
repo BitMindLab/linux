@@ -6,11 +6,13 @@
 	Director, National Security Agency.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-	Center of Excellence in Space Data and Information Sciences
-	   Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
+
   
   This is the chip-specific code for many 8390-based ethernet adaptors.
   This is not a complete driver, it must be combined with board-specific
@@ -45,15 +47,14 @@
 
   */
 
-static const char *version =
+static const char version[] =
     "8390.c:v1.10cvs 9/23/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/fs.h>
 #include <linux/types.h>
-#include <linux/ptrace.h>
 #include <linux/string.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -66,6 +67,7 @@ static const char *version =
 #include <linux/in.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
+#include <linux/crc32.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -268,13 +270,14 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	struct ei_device *ei_local = (struct ei_device *) dev->priv;
 	int length, send_length, output_page;
 	unsigned long flags;
+	char scratch[ETH_ZLEN];
 
 	length = skb->len;
 
 	/* Mask interrupts from the ethercard. 
 	   SMP: We have to grab the lock here otherwise the IRQ handler
 	   on another CPU can flip window and race the IRQ mask set. We end
-	   up trashing the mcast filter not disabling irqs if we dont lock */
+	   up trashing the mcast filter not disabling irqs if we don't lock */
 	   
 	spin_lock_irqsave(&ei_local->page_lock, flags);
 	outb_p(0x00, e8390_base + EN0_IMR);
@@ -338,8 +341,15 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * isn't already sending. If it is busy, the interrupt handler will
 	 * trigger the send later, upon receiving a Tx done interrupt.
 	 */
-
-	ei_block_output(dev, length, skb->data, output_page);
+	 
+	if (length == send_length)
+		ei_block_output(dev, length, skb->data, output_page);
+	else {
+		memset(scratch, 0, ETH_ZLEN);
+		memcpy(scratch, skb->data, skb->len);
+		ei_block_output(dev, ETH_ZLEN, scratch, output_page);
+	}
+		
 	if (! ei_local->txing) 
 	{
 		ei_local->txing = 1;
@@ -371,7 +381,13 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * reasonable hardware if you only use one Tx buffer.
 	 */
 
-	ei_block_output(dev, length, skb->data, ei_local->tx_start_page);
+	if (length == send_length)
+		ei_block_output(dev, length, skb->data, ei_local->tx_start_page);
+	else {
+		memset(scratch, 0, ETH_ZLEN);
+		memcpy(scratch, skb->data, skb->len);
+		ei_block_output(dev, ETH_ZLEN, scratch, ei_local->tx_start_page);
+	}
 	ei_local->txing = 1;
 	NS8390_trigger_send(dev, send_length, ei_local->tx_start_page);
 	dev->trans_start = jiffies;
@@ -401,11 +417,11 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
  * Handle the ether interface interrupts. We pull packets from
  * the 8390 via the card specific functions and fire them at the networking
  * stack. We also handle transmit completions and wake the transmit path if
- * neccessary. We also update the counters and do other housekeeping as
+ * necessary. We also update the counters and do other housekeeping as
  * needed.
  */
 
-void ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+irqreturn_t ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	struct net_device *dev = dev_id;
 	long e8390_base;
@@ -415,7 +431,7 @@ void ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	if (dev == NULL) 
 	{
 		printk ("net_interrupt(): irq %d for unknown device.\n", irq);
-		return;
+		return IRQ_NONE;
 	}
     
 	e8390_base = dev->base_addr;
@@ -438,7 +454,7 @@ void ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 			   inb_p(e8390_base + EN0_IMR));
 #endif
 		spin_unlock(&ei_local->page_lock);
-		return;
+		return IRQ_NONE;
 	}
     
 	/* Change to page 0 and read the intr status reg. */
@@ -453,6 +469,8 @@ void ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	{
 		if (!netif_running(dev)) {
 			printk(KERN_WARNING "%s: interrupt from stopped card\n", dev->name);
+			/* rmk - acknowledge the interrupts */
+			outb_p(interrupts, e8390_base + EN0_ISR);
 			interrupts = 0;
 			break;
 		}
@@ -502,7 +520,7 @@ void ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 		}
 	}
 	spin_unlock(&ei_local->page_lock);
-	return;
+	return IRQ_HANDLED;
 }
 
 /**
@@ -742,6 +760,7 @@ static void ei_receive(struct net_device *dev)
 				ei_block_input(dev, pkt_len, skb, current_offset + sizeof(rx_frame));
 				skb->protocol=eth_type_trans(skb,dev);
 				netif_rx(skb);
+				dev->last_rx = jiffies;
 				ei_local->stat.rx_packets++;
 				ei_local->stat.rx_bytes += pkt_len;
 				if (pkt_stat & ENRSR_PHY)
@@ -880,27 +899,6 @@ static struct net_device_stats *get_stats(struct net_device *dev)
 }
 
 /*
- * Update the given Autodin II CRC value with another data byte.
- */
-
-static inline u32 update_crc(u8 byte, u32 current_crc)
-{
-	int bit;
-	u8 ah = 0;
-	for (bit=0; bit<8; bit++) 
-	{
-		u8 carry = (current_crc>>31);
-		current_crc <<= 1;
-		ah = ((ah<<1) | carry) ^ byte;
-		if (ah&1)
-			current_crc ^= 0x04C11DB7;	/* CRC polynomial */
-		ah >>= 1;
-		byte >>= 1;
-	}
-	return current_crc;
-}
-
-/*
  * Form the 64 bit 8390 multicast table from the linked list of addresses
  * associated with this dev structure.
  */
@@ -911,16 +909,13 @@ static inline void make_mc_bits(u8 *bits, struct net_device *dev)
 
 	for (dmi=dev->mc_list; dmi; dmi=dmi->next) 
 	{
-		int i;
 		u32 crc;
 		if (dmi->dmi_addrlen != ETH_ALEN) 
 		{
 			printk(KERN_INFO "%s: invalid multicast address length given.\n", dev->name);
 			continue;
 		}
-		crc = 0xffffffff;	/* initial CRC value */
-		for (i=0; i<ETH_ALEN; i++)
-			crc = update_crc(dmi->dmi_addr[i], crc);
+		crc = ether_crc(ETH_ALEN, dmi->dmi_addr);
 		/* 
 		 * The 8390 uses the 6 most significant bits of the
 		 * CRC to index the multicast table.
@@ -1002,6 +997,11 @@ static void set_multicast_list(struct net_device *dev)
 	spin_unlock_irqrestore(&ei_local->page_lock, flags);
 }	
 
+static inline void ei_device_init(struct ei_device *ei_local)
+{
+	spin_lock_init(&ei_local->page_lock);
+}
+
 /**
  * ethdev_init - init rest of 8390 device struct
  * @dev: network device structure to init
@@ -1017,14 +1017,11 @@ int ethdev_init(struct net_device *dev)
     
 	if (dev->priv == NULL) 
 	{
-		struct ei_device *ei_local;
-		
 		dev->priv = kmalloc(sizeof(struct ei_device), GFP_KERNEL);
 		if (dev->priv == NULL)
 			return -ENOMEM;
 		memset(dev->priv, 0, sizeof(struct ei_device));
-		ei_local = (struct ei_device *)dev->priv;
-		spin_lock_init(&ei_local->page_lock);
+		ei_device_init(dev->priv);
 	}
     
 	dev->hard_start_xmit = &ei_start_xmit;
@@ -1035,6 +1032,29 @@ int ethdev_init(struct net_device *dev)
         
 	return 0;
 }
+
+/* wrapper to make alloc_netdev happy; probably should just cast... */
+static void __ethdev_init(struct net_device *dev)
+{
+	ethdev_init(dev);
+}
+
+/**
+ * alloc_ei_netdev - alloc_etherdev counterpart for 8390
+ *
+ * Allocate 8390-specific net_device.
+ */
+struct net_device *alloc_ei_netdev(void)
+{
+	struct net_device *dev;
+	
+	dev = alloc_netdev(sizeof(struct ei_device), "eth%d", __ethdev_init);
+	if (dev)
+		ei_device_init(dev->priv);
+
+	return dev;
+}
+
 
 
 
@@ -1138,6 +1158,7 @@ EXPORT_SYMBOL(ei_interrupt);
 EXPORT_SYMBOL(ei_tx_timeout);
 EXPORT_SYMBOL(ethdev_init);
 EXPORT_SYMBOL(NS8390_init);
+EXPORT_SYMBOL(alloc_ei_netdev);
 
 #if defined(MODULE)
 
@@ -1151,13 +1172,4 @@ void cleanup_module(void)
 }
 
 #endif /* MODULE */
-
-/*
- * Local variables:
- *  compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/net/inet -Wall -Wstrict-prototypes -O6 -m486 -c 8390.c"
- *  version-control: t
- *  kept-new-versions: 5
- *  c-indent-level: 4
- *  tab-width: 4
- * End:
- */
+MODULE_LICENSE("GPL");

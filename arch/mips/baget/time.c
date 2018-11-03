@@ -1,4 +1,4 @@
-/* $Id: time.c,v 1.3 1999/08/17 22:18:37 ralf Exp $
+/*
  * time.c: Baget/MIPS specific time handling details
  *
  * Copyright (C) 1998 Gleb Raiko & Vladimir Roganov
@@ -6,35 +6,38 @@
 
 #include <linux/errno.h>
 #include <linux/init.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/time.h>
 #include <linux/interrupt.h>
 #include <linux/timex.h>
-#include <linux/kernel_stat.h>
+#include <linux/spinlock.h>
 
 #include <asm/bootinfo.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/ptrace.h>
-#include <asm/system.h>  
+#include <asm/system.h>
 
 #include <asm/baget/baget.h>
 
-/* 
+/*
  *  To have precision clock, we need to fix available clock frequency
  */
 #define FREQ_NOM  79125  /* Baget frequency ratio */
 #define FREQ_DEN  10000
-static inline int timer_intr_valid(void) 
+
+static inline int timer_intr_valid(void)
 {
 	static unsigned long long ticks, valid_ticks;
 
 	if (ticks++ * FREQ_DEN >= valid_ticks * FREQ_NOM) {
-		/* 
-		 *  We need no overflow checks, 
+		/*
+		 *  We need no overflow checks,
 		 *  due baget unable to work 3000 years...
 		 *  At least without reboot...
 		 */
@@ -47,8 +50,8 @@ static inline int timer_intr_valid(void)
 void static timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	if (timer_intr_valid()) {
-	sti();
-	do_timer(regs);
+		sti();
+		do_timer(regs);
 	}
 }
 
@@ -60,10 +63,10 @@ static void __init timer_enable(void)
 	vic_outb(ss0cr0, VIC_SS0CR0);
 
 	vic_outb(VIC_INT_IPL(6)|VIC_INT_NOAUTO|VIC_INT_EDGE|
-		 VIC_INT_LOW|VIC_INT_ENABLE, VIC_LINT2); 
+		 VIC_INT_LOW|VIC_INT_ENABLE, VIC_LINT2);
 }
 
-static struct irqaction timer_irq  = 
+static struct irqaction timer_irq  =
 { timer_interrupt, SA_INTERRUPT, 0, "timer", NULL, NULL};
 
 void __init time_init(void)
@@ -76,21 +79,27 @@ void __init time_init(void)
 
 void do_gettimeofday(struct timeval *tv)
 {
-        unsigned long flags;
+	unsigned long seq;
 
-        save_and_cli(flags);
-        *tv = xtime;
-        restore_flags(flags);
+	do {
+		seq = read_seqbegin(&xtime_lock);
+		tv->tv_sec = xtime.tv_sec;
+		tv->tv_usec = xtime.tv_nsec / 1000;
+	} while (read_seqretry(&xtime_lock, seq));
 }
+
+EXPORT_SYMBOL(do_gettimeofday);
 
 void do_settimeofday(struct timeval *tv)
 {
-        unsigned long flags;
-  
-        save_and_cli(flags);
-        xtime = *tv;
-        time_state = TIME_BAD;
-        time_maxerror = MAXPHASE;
-        time_esterror = MAXPHASE;
-        restore_flags(flags);
-} 
+	write_seqlock_irq(&xtime_lock);
+	xtime.tv_usec = tv->tv_sec;
+	xtime.tv_nsec = tv->tv_usec;
+	time_adjust = 0;		/* stop active adjtime() */
+	time_status |= STA_UNSYNC;
+	time_maxerror = NTP_PHASE_LIMIT;
+	time_esterror = NTP_PHASE_LIMIT;
+	write_sequnlock_irq(&xtime_lock);
+}
+
+EXPORT_SYMBOL(do_settimeofday);

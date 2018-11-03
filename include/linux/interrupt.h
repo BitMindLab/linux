@@ -4,15 +4,36 @@
 
 #include <linux/config.h>
 #include <linux/kernel.h>
-#include <linux/smp.h>
-#include <linux/cache.h>
-
-#include <asm/bitops.h>
+#include <linux/linkage.h>
+#include <linux/bitops.h>
+#include <linux/preempt.h>
 #include <asm/atomic.h>
+#include <asm/hardirq.h>
 #include <asm/ptrace.h>
+#include <asm/system.h>
+
+/*
+ * For 2.4.x compatibility, 2.4.x can use
+ *
+ *	typedef void irqreturn_t;
+ *	#define IRQ_NONE
+ *	#define IRQ_HANDLED
+ *	#define IRQ_RETVAL(x)
+ *
+ * To mix old-style and new-style irq handler returns.
+ *
+ * IRQ_NONE means we didn't handle it.
+ * IRQ_HANDLED means that we did have a valid interrupt and handled it.
+ * IRQ_RETVAL(x) selects on the two depending on x being non-zero (for handled)
+ */
+typedef int irqreturn_t;
+
+#define IRQ_NONE	(0)
+#define IRQ_HANDLED	(1)
+#define IRQ_RETVAL(x)	((x) != 0)
 
 struct irqaction {
-	void (*handler)(int, void *, struct pt_regs *);
+	irqreturn_t (*handler)(int, void *, struct pt_regs *);
 	unsigned long flags;
 	unsigned long mask;
 	const char *name;
@@ -20,32 +41,30 @@ struct irqaction {
 	struct irqaction *next;
 };
 
+extern irqreturn_t no_action(int cpl, void *dev_id, struct pt_regs *regs);
+extern int request_irq(unsigned int,
+		       irqreturn_t (*handler)(int, void *, struct pt_regs *),
+		       unsigned long, const char *, void *);
+extern void free_irq(unsigned int, void *);
 
-/* Who gets which entry in bh_base.  Things which will occur most often
-   should come first */
-   
-enum {
-	TIMER_BH = 0,
-	TQUEUE_BH,
-	DIGI_BH,
-	SERIAL_BH,
-	RISCOM8_BH,
-	SPECIALIX_BH,
-	AURORA_BH,
-	ESP_BH,
-	SCSI_BH,
-	IMMEDIATE_BH,
-	CYCLADES_BH,
-	CM206_BH,
-	JS_BH,
-	MACSERIAL_BH,
-	ISICOM_BH
-};
+/*
+ * Temporary defines for UP kernels, until all code gets fixed.
+ */
+#ifndef CONFIG_SMP
+# define cli()			local_irq_disable()
+# define sti()			local_irq_enable()
+# define save_flags(x)		local_save_flags(x)
+# define restore_flags(x)	local_irq_restore(x)
+# define save_and_cli(x)	local_irq_save(x)
+#endif
 
-#include <asm/hardirq.h>
-#include <asm/softirq.h>
+/* SoftIRQ primitives.  */
+#define local_bh_disable() \
+		do { preempt_count() += SOFTIRQ_OFFSET; barrier(); } while (0)
+#define __local_bh_enable() \
+		do { barrier(); preempt_count() -= SOFTIRQ_OFFSET; } while (0)
 
-
+extern void local_bh_enable(void);
 
 /* PLEASE, avoid to allocate new softirqs, if you need not _really_ high
    frequency threaded job scheduling. For almost all the purposes
@@ -56,8 +75,10 @@ enum {
 enum
 {
 	HI_SOFTIRQ=0,
+	TIMER_SOFTIRQ,
 	NET_TX_SOFTIRQ,
 	NET_RX_SOFTIRQ,
+	SCSI_SOFTIRQ,
 	TASKLET_SOFTIRQ
 };
 
@@ -73,25 +94,14 @@ struct softirq_action
 
 asmlinkage void do_softirq(void);
 extern void open_softirq(int nr, void (*action)(struct softirq_action*), void *data);
-
-static inline void __cpu_raise_softirq(int cpu, int nr)
-{
-	softirq_active(cpu) |= (1<<nr);
-}
-
-
-/* I do not want to use atomic variables now, so that cli/sti */
-static inline void raise_softirq(int nr)
-{
-	unsigned long flags;
-
-	local_irq_save(flags);
-	__cpu_raise_softirq(smp_processor_id(), nr);
-	local_irq_restore(flags);
-}
-
 extern void softirq_init(void);
+#define __raise_softirq_irqoff(nr) do { local_softirq_pending() |= 1UL << (nr); } while (0)
+extern void FASTCALL(raise_softirq_irqoff(unsigned int nr));
+extern void FASTCALL(raise_softirq(unsigned int nr));
 
+#ifndef invoke_softirq
+#define invoke_softirq() do_softirq()
+#endif
 
 
 /* Tasklets --- multithreaded analogue of BHs.
@@ -136,107 +146,73 @@ enum
 	TASKLET_STATE_RUN	/* Tasklet is running (SMP only) */
 };
 
-struct tasklet_head
-{
-	struct tasklet_struct *list;
-} __attribute__ ((__aligned__(SMP_CACHE_BYTES)));
-
-extern struct tasklet_head tasklet_vec[NR_CPUS];
-extern struct tasklet_head tasklet_hi_vec[NR_CPUS];
-
 #ifdef CONFIG_SMP
-#define tasklet_trylock(t) (!test_and_set_bit(TASKLET_STATE_RUN, &(t)->state))
-#define tasklet_unlock_wait(t) while (test_bit(TASKLET_STATE_RUN, &(t)->state)) { /* NOTHING */ }
-#define tasklet_unlock(t) clear_bit(TASKLET_STATE_RUN, &(t)->state)
+static inline int tasklet_trylock(struct tasklet_struct *t)
+{
+	return !test_and_set_bit(TASKLET_STATE_RUN, &(t)->state);
+}
+
+static inline void tasklet_unlock(struct tasklet_struct *t)
+{
+	smp_mb__before_clear_bit(); 
+	clear_bit(TASKLET_STATE_RUN, &(t)->state);
+}
+
+static inline void tasklet_unlock_wait(struct tasklet_struct *t)
+{
+	while (test_bit(TASKLET_STATE_RUN, &(t)->state)) { barrier(); }
+}
 #else
 #define tasklet_trylock(t) 1
 #define tasklet_unlock_wait(t) do { } while (0)
 #define tasklet_unlock(t) do { } while (0)
 #endif
 
+extern void FASTCALL(__tasklet_schedule(struct tasklet_struct *t));
+
 static inline void tasklet_schedule(struct tasklet_struct *t)
 {
-	if (!test_and_set_bit(TASKLET_STATE_SCHED, &t->state)) {
-		int cpu = smp_processor_id();
-		unsigned long flags;
-
-		local_irq_save(flags);
-		t->next = tasklet_vec[cpu].list;
-		tasklet_vec[cpu].list = t;
-		__cpu_raise_softirq(cpu, TASKLET_SOFTIRQ);
-		local_irq_restore(flags);
-	}
+	if (!test_and_set_bit(TASKLET_STATE_SCHED, &t->state))
+		__tasklet_schedule(t);
 }
+
+extern void FASTCALL(__tasklet_hi_schedule(struct tasklet_struct *t));
 
 static inline void tasklet_hi_schedule(struct tasklet_struct *t)
 {
-	if (!test_and_set_bit(TASKLET_STATE_SCHED, &t->state)) {
-		int cpu = smp_processor_id();
-		unsigned long flags;
-
-		local_irq_save(flags);
-		t->next = tasklet_hi_vec[cpu].list;
-		tasklet_hi_vec[cpu].list = t;
-		__cpu_raise_softirq(cpu, HI_SOFTIRQ);
-		local_irq_restore(flags);
-	}
+	if (!test_and_set_bit(TASKLET_STATE_SCHED, &t->state))
+		__tasklet_hi_schedule(t);
 }
 
 
 static inline void tasklet_disable_nosync(struct tasklet_struct *t)
 {
 	atomic_inc(&t->count);
+	smp_mb__after_atomic_inc();
 }
 
 static inline void tasklet_disable(struct tasklet_struct *t)
 {
 	tasklet_disable_nosync(t);
 	tasklet_unlock_wait(t);
+	smp_mb();
 }
 
 static inline void tasklet_enable(struct tasklet_struct *t)
 {
+	smp_mb__before_atomic_dec();
+	atomic_dec(&t->count);
+}
+
+static inline void tasklet_hi_enable(struct tasklet_struct *t)
+{
+	smp_mb__before_atomic_dec();
 	atomic_dec(&t->count);
 }
 
 extern void tasklet_kill(struct tasklet_struct *t);
 extern void tasklet_init(struct tasklet_struct *t,
 			 void (*func)(unsigned long), unsigned long data);
-
-#ifdef CONFIG_SMP
-
-#define SMP_TIMER_NAME(name) name##__thr
-
-#define SMP_TIMER_DEFINE(name, task) \
-DECLARE_TASKLET(task, name##__thr, 0); \
-static void name (unsigned long dummy) \
-{ \
-	tasklet_schedule(&(task)); \
-}
-
-#else /* CONFIG_SMP */
-
-#define SMP_TIMER_NAME(name) name
-#define SMP_TIMER_DEFINE(name, task)
-
-#endif /* CONFIG_SMP */
-
-
-/* Old BH definitions */
-
-extern struct tasklet_struct bh_task_vec[];
-
-/* It is exported _ONLY_ for wait_on_irq(). */
-extern spinlock_t global_bh_lock;
-
-static inline void mark_bh(int nr)
-{
-	tasklet_hi_schedule(bh_task_vec+nr);
-}
-
-extern void init_bh(int nr, void (*routine)(void));
-extern void remove_bh(int nr);
-
 
 /*
  * Autoprobing for irqs:

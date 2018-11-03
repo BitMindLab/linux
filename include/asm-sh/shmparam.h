@@ -1,6 +1,6 @@
 #ifndef __ASM_SH_SHMPARAM_H
 #define __ASM_SH_SHMPARAM_H
 
-#define	SHMLBA PAGE_SIZE		 /* attach addr a multiple of this */
+#include <asm/cpu/shmparam.h>
 
 #endif /* __ASM_SH_SHMPARAM_H */

@@ -7,25 +7,20 @@
  */
 
 #include <linux/stat.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/shm.h>
 #include <linux/errno.h>
 #include <linux/mman.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/fcntl.h>
 #include <linux/ncp_fs.h>
 
 #include "ncplib_kernel.h"
 #include <asm/uaccess.h>
 #include <asm/system.h>
-
-static inline int min(int a, int b)
-{
-	return a < b ? a : b;
-}
 
 /*
  * Fill in the supplied page for mmap
@@ -43,7 +38,7 @@ static struct page* ncp_file_mmap_nopage(struct vm_area_struct *area,
 	int bufsize;
 	int pos;
 
-	page = alloc_page(GFP_HIGHMEM); /* ncpfs has nothing against GFP_HIGHMEM
+	page = alloc_page(GFP_HIGHUSER); /* ncpfs has nothing against high pages
 	           as long as recvmsg and memset works on it */
 	if (!page)
 		return page;
@@ -66,7 +61,7 @@ static struct page* ncp_file_mmap_nopage(struct vm_area_struct *area,
 
 			to_read = bufsize - (pos % bufsize);
 
-			to_read = min(to_read, count - already_read);
+			to_read = min_t(unsigned int, to_read, count - already_read);
 
 			if (ncp_read_kernel(NCP_SERVER(inode),
 				     NCP_FINFO(inode)->file_handle,
@@ -95,7 +90,7 @@ static struct page* ncp_file_mmap_nopage(struct vm_area_struct *area,
 
 static struct vm_operations_struct ncp_file_mmap =
 {
-	nopage:	ncp_file_mmap_nopage,
+	.nopage	= ncp_file_mmap_nopage,
 };
 
 

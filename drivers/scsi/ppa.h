@@ -78,17 +78,15 @@
 #include  <linux/stddef.h>
 #include  <linux/module.h>
 #include  <linux/kernel.h>
-#include  <linux/tqueue.h>
 #include  <linux/ioport.h>
 #include  <linux/delay.h>
 #include  <linux/proc_fs.h>
 #include  <linux/stat.h>
-#include  <linux/blk.h>
+#include  <linux/blkdev.h>
 #include  <linux/sched.h>
 #include  <linux/interrupt.h>
 
 #include  <asm/io.h>
-#include  "sd.h"
 #include  "hosts.h"
 /* batteries not included :-) */
 
@@ -126,7 +124,7 @@ int ppa_sg = SG_ALL;		/* enable/disable scatter-gather. */
 #define PPA_SELECT_TMO  5000	/* how long to wait for target ? */
 #define PPA_SPIN_TMO    50000	/* ppa_wait loop limiter */
 #define PPA_RECON_TMO   500	/* scsi reconnection loop limiter */
-#define PPA_DEBUG	0	/* debuging option */
+#define PPA_DEBUG	0	/* debugging option */
 #define IN_EPP_MODE(x) (x == PPA_EPP_8 || x == PPA_EPP_16 || x == PPA_EPP_32)
 
 /* args to ppa_connect */
@@ -169,25 +167,8 @@ int ppa_command(Scsi_Cmnd *);
 int ppa_queuecommand(Scsi_Cmnd *, void (*done) (Scsi_Cmnd *));
 int ppa_abort(Scsi_Cmnd *);
 int ppa_reset(Scsi_Cmnd *);
-int ppa_proc_info(char *, char **, off_t, int, int, int);
-int ppa_biosparam(Disk *, kdev_t, int *);
+int ppa_proc_info(struct Scsi_Host *host, char *, char **, off_t, int, int);
+int ppa_biosparam(struct scsi_device *, struct block_device *,
+		sector_t, int *);
 
-#define PPA {	proc_name:			"ppa",		\
-		proc_info:			ppa_proc_info,		\
-		name:				"Iomega VPI0 (ppa) interface",\
-		detect:				ppa_detect,		\
-		release:			ppa_release,		\
-		command:			ppa_command,		\
-		queuecommand:			ppa_queuecommand,	\
-		eh_abort_handler:		ppa_abort,		\
-		eh_device_reset_handler:	NULL,			\
-		eh_bus_reset_handler:		ppa_reset,		\
-		eh_host_reset_handler:		ppa_reset,		\
-		use_new_eh_code:		1,			\
-		bios_param:			ppa_biosparam,		\
-		this_id:			-1,			\
-		sg_tablesize:			SG_ALL,			\
-		cmd_per_lun:			1,			\
-		use_clustering:			ENABLE_CLUSTERING	\
-}
 #endif				/* _PPA_H */

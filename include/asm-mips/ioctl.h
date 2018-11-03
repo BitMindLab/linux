@@ -1,14 +1,12 @@
 /*
- * Linux ioctl() stuff.
- *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995, 1996 by Ralf Baechle
+ * Copyright (C) 1995, 96, 99, 2001 Ralf Baechle
  */
-#ifndef __ASM_MIPS_IOCTL_H
-#define __ASM_MIPS_IOCTL_H
+#ifndef _ASM_IOCTL_H
+#define _ASM_IOCTL_H
 
 /*
  * The original linux ioctl numbering scheme was just a general
@@ -65,7 +63,7 @@
 	(((dir)  << _IOC_DIRSHIFT) | \
 	 ((type) << _IOC_TYPESHIFT) | \
 	 ((nr)   << _IOC_NRSHIFT) | \
-	 (((size) & _IOC_SLMASK) << _IOC_SIZESHIFT))
+	 ((size) << _IOC_SIZESHIFT))
 
 /* used to create numbers */
 #define _IO(type,nr)		_IOC(_IOC_NONE,(type),(nr),0)
@@ -87,4 +85,4 @@
 #define IOCSIZE_MASK	(_IOC_SIZEMASK << _IOC_SIZESHIFT)
 #define IOCSIZE_SHIFT	(_IOC_SIZESHIFT)
 
-#endif /* __ASM_MIPS_IOCTL_H */
+#endif /* _ASM_IOCTL_H */

@@ -68,27 +68,32 @@ typedef unsigned long sigset_t;
 
 /* These should not be considered constants from userland.  */
 #define SIGRTMIN	32
-#define SIGRTMAX	(_NSIG-1)
+#define SIGRTMAX	_NSIG
 
 #define SIGSWI		32
 
 /*
  * SA_FLAGS values:
  *
- * SA_ONSTACK is not currently supported, but will allow sigaltstack(2).
- * SA_INTERRUPT is a no-op, but left due to historical reasons. Use the
- * SA_RESTART flag to get restarting signals (which were the default long ago)
- * SA_NOCLDSTOP flag to turn off SIGCHLD when children stop.
- * SA_RESETHAND clears the handler when the signal is delivered.
- * SA_NOCLDWAIT flag on SIGCHLD to inhibit zombies.
- * SA_NODEFER prevents the current signal from being masked in the handler.
+ * SA_NOCLDSTOP		flag to turn off SIGCHLD when children stop.
+ * SA_NOCLDWAIT		flag on SIGCHLD to inhibit zombies.
+ * SA_SIGINFO		deliver the signal with SIGINFO structs
+ * SA_THIRTYTWO		delivers the signal in 32-bit mode, even if the task 
+ *			is running in 26-bit.
+ * SA_ONSTACK		allows alternate signal stacks (see sigaltstack(2)).
+ * SA_RESTART		flag to get restarting signals (which were the default long ago)
+ * SA_INTERRUPT		is a no-op, but left due to historical reasons. Use the
+ * SA_NODEFER		prevents the current signal from being masked in the handler.
+ * SA_RESETHAND		clears the handler when the signal is delivered.
  *
  * SA_ONESHOT and SA_NOMASK are the historical Linux names for the Single
  * Unix names RESETHAND and NODEFER respectively.
  */
 #define SA_NOCLDSTOP	0x00000001
-#define SA_NOCLDWAIT	0x00000002 /* not supported yet */
+#define SA_NOCLDWAIT	0x00000002
 #define SA_SIGINFO	0x00000004
+#define SA_THIRTYTWO	0x02000000
+#define SA_RESTORER	0x04000000
 #define SA_ONSTACK	0x08000000
 #define SA_RESTART	0x10000000
 #define SA_NODEFER	0x40000000
@@ -98,9 +103,6 @@ typedef unsigned long sigset_t;
 #define SA_ONESHOT	SA_RESETHAND
 #define SA_INTERRUPT	0x20000000 /* dummy -- ignored */
 
-#define SA_RESTORER	0x04000000
-#define SA_THIRTYTWO	0x02000000 /* deliver signal in 32-bit mode even if
-				      task is running 26 bits. */
 
 /* 
  * sigaltstack controls
@@ -182,9 +184,7 @@ typedef struct sigaltstack {
 
 #ifdef __KERNEL__
 #include <asm/sigcontext.h>
-
-#define sigmask(sig)	(1UL << ((sig) - 1))
-
+#define ptrace_signal_deliver(regs, cookie) do { } while (0)
 #endif
 
 #endif

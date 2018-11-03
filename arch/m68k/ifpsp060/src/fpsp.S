@@ -2201,7 +2201,7 @@ fu_snan_s_p:
 	mov.l		LOCAL_SIZE+2+EXC_PC(%sp),LOCAL_SIZE+2+EXC_PC-0xc(%sp)
 	mov.l		LOCAL_SIZE+EXC_EA(%sp),LOCAL_SIZE+EXC_EA-0xc(%sp)
 
-# now, we copy the default result to it's proper location
+# now, we copy the default result to its proper location
 	mov.l		LOCAL_SIZE+FP_DST_EX(%sp),LOCAL_SIZE+0x4(%sp)
 	mov.l		LOCAL_SIZE+FP_DST_HI(%sp),LOCAL_SIZE+0x8(%sp)
 	mov.l		LOCAL_SIZE+FP_DST_LO(%sp),LOCAL_SIZE+0xc(%sp)
@@ -2241,7 +2241,7 @@ fu_operr_p_s:
 	mov.l		LOCAL_SIZE+2+EXC_PC(%sp),LOCAL_SIZE+2+EXC_PC-0xc(%sp)
 	mov.l		LOCAL_SIZE+EXC_EA(%sp),LOCAL_SIZE+EXC_EA-0xc(%sp)
 
-# now, we copy the default result to it's proper location
+# now, we copy the default result to its proper location
 	mov.l		LOCAL_SIZE+FP_DST_EX(%sp),LOCAL_SIZE+0x4(%sp)
 	mov.l		LOCAL_SIZE+FP_DST_HI(%sp),LOCAL_SIZE+0x8(%sp)
 	mov.l		LOCAL_SIZE+FP_DST_LO(%sp),LOCAL_SIZE+0xc(%sp)
@@ -2281,7 +2281,7 @@ fu_inex_s_p2:
 	mov.l		LOCAL_SIZE+2+EXC_PC(%sp),LOCAL_SIZE+2+EXC_PC-0xc(%sp)
 	mov.l		LOCAL_SIZE+EXC_EA(%sp),LOCAL_SIZE+EXC_EA-0xc(%sp)
 
-# now, we copy the default result to it's proper location
+# now, we copy the default result to its proper location
 	mov.l		LOCAL_SIZE+FP_DST_EX(%sp),LOCAL_SIZE+0x4(%sp)
 	mov.l		LOCAL_SIZE+FP_DST_HI(%sp),LOCAL_SIZE+0x8(%sp)
 	mov.l		LOCAL_SIZE+FP_DST_LO(%sp),LOCAL_SIZE+0xc(%sp)
@@ -2944,7 +2944,7 @@ iea_fmovm_trace:
 # The FPU is disabled and so we should really have taken the "Line
 # F Emulator" exception. So, here we create an 8-word stack frame
 # from our 4-word stack frame. This means we must calculate the length
-# the the faulting instruction to get the "next PC". This is trivial for
+# the faulting instruction to get the "next PC". This is trivial for
 # immediate operands but requires some extra work for fmovm dynamic
 # which can use most addressing modes.
 iea_disabled:
@@ -19594,7 +19594,7 @@ ceaf_pd7:
 # in the data register file. If it's actually out in memory, use one of	#
 # the mem_read() routines to fetch it. If the mem_read() access returns	#
 # a failing value, exit through the special facc_in() routine which	#
-# will create an acess error exception frame from the current exception #
+# will create an access error exception frame from the current exception #
 # frame.								#
 # 	Immediate data and regular data accesses are separated because 	#
 # if an immediate data access fails, the resulting fault status		#
@@ -22147,7 +22147,7 @@ sgl_done:
 add_ext:
 	addq.l		&1,FTEMP_LO(%a0)	# add 1 to l-bit
 	bcc.b		xcc_clr			# test for carry out
-	addq.l		&1,FTEMP_HI(%a0)	# propogate carry
+	addq.l		&1,FTEMP_HI(%a0)	# propagate carry
 	bcc.b		xcc_clr
 	roxr.w		FTEMP_HI(%a0)		# mant is 0 so restore v-bit
 	roxr.w		FTEMP_HI+2(%a0)		# mant is 0 so restore v-bit
@@ -22167,7 +22167,7 @@ add_ext_done:
 add_dbl:
 	add.l		&ad_1_dbl, FTEMP_LO(%a0) # add 1 to lsb
 	bcc.b		dcc_clr			# no carry
-	addq.l		&0x1, FTEMP_HI(%a0)	# propogate carry
+	addq.l		&0x1, FTEMP_HI(%a0)	# propagate carry
 	bcc.b		dcc_clr			# no carry
 
 	roxr.w		FTEMP_HI(%a0)		# mant is 0 so restore v-bit
@@ -23523,7 +23523,7 @@ no_exc:
 #		in INEX2.						#
 #									#
 #	A10.	Or in INEX.						#
-#		If INEX is set, round error occured.  This is		#
+#		If INEX is set, round error occurred.  This is		#
 #		compensated for by 'or-ing' in the INEX2 flag to	#
 #		the lsb of Y.						#
 #									#
@@ -23989,7 +23989,7 @@ A9_con:
 	fmul.x		%fp1,%fp0	# calculate X * SCALE -> Y to fp0
 
 # A10. Or in INEX.
-#      If INEX is set, round error occured.  This is compensated
+#      If INEX is set, round error occurred.  This is compensated
 #      for by 'or-ing' in the INEX2 flag to the lsb of Y.
 #
 # Register usage:
@@ -24608,7 +24608,7 @@ end_bstr:
 # made out of the current exception stack frame. 			#
 #	So, we first call restore() which makes sure that any updated	#
 # -(an)+ register gets returned to its pre-exception value and then	#
-# we change the stack to an acess error stack frame.			#
+# we change the stack to an access error stack frame.			#
 #									#
 #########################################################################
 

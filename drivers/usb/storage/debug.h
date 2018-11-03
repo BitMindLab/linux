@@ -1,10 +1,10 @@
 /* Driver for USB Mass Storage compliant devices
  * Debugging Functions Header File
  *
- * $Id: debug.h,v 1.5 2000/09/04 02:12:47 groovyjava Exp $
+ * $Id: debug.h,v 1.6 2001/01/12 23:51:04 mdharm Exp $
  *
  * Current development and maintenance by:
- *   (c) 1999, 2000 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+ *   (c) 1999-2002 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
  *
  * Initial work by:
  *   (c) 1999 Michael Gee (michael@linuxspecific.com)
@@ -46,9 +46,8 @@
 
 #include <linux/config.h>
 #include <linux/kernel.h>
-#include <linux/blk.h>
 #include <linux/cdrom.h>
-#include "scsi.h"
+#include "usb.h"
 
 #define USB_STORAGE "usb-storage: "
 

@@ -2,6 +2,12 @@
  * 1999 Copyright (C) Pavel Machek, pavel@ucw.cz. This code is GPL.
  * 1999/11/04 Copyright (C) 1999 VMware, Inc. (Regis "HPReg" Duchesne)
  *            Made nbd_end_request() use the io_request_lock
+ * 2001 Copyright (C) Steven Whitehouse
+ *            New nbd_end_request() for compatibility with new linux block
+ *            layer code.
+ * 2003/06/24 Louis D. Langholtz <ldl@aros.net>
+ *            Removed unneeded blksize_bits field from nbd_device struct.
+ *            Cleanup PARANOIA usage & code.
  */
 
 #ifndef LINUX_NBD_H
@@ -17,66 +23,35 @@
 #define NBD_SET_SIZE_BLOCKS	_IO( 0xab, 7 )
 #define NBD_DISCONNECT  _IO( 0xab, 8 )
 
-#ifdef MAJOR_NR
+enum {
+	NBD_CMD_READ = 0,
+	NBD_CMD_WRITE = 1,
+	NBD_CMD_DISC = 2
+};
 
-#include <linux/locks.h>
-#include <asm/semaphore.h>
-
-#define LOCAL_END_REQUEST
-
-#include <linux/blk.h>
-
-#ifdef PARANOIA
-extern int requests_in;
-extern int requests_out;
-#endif
-
-static int 
-nbd_end_request(struct request *req)
-{
-	unsigned long flags;
-	int ret = 0;
-
-#ifdef PARANOIA
-	requests_out++;
-#endif
-	/*
-	 * This is a very dirty hack that we have to do to handle
-	 * merged requests because end_request stuff is a bit
-	 * broken. The fact we have to do this only if there
-	 * aren't errors looks even more silly.
-	 */
-	if (!req->errors) {
-		req->sector += req->current_nr_sectors;
-		req->nr_sectors -= req->current_nr_sectors;
-	}
-
-	spin_lock_irqsave(&io_request_lock, flags);
-	if (end_that_request_first( req, !req->errors, "nbd" ))
-		goto out;
-	ret = 1;
-	end_that_request_last( req );
-
-out:
-	spin_unlock_irqrestore(&io_request_lock, flags);
-	return ret;
-}
-
+#define nbd_cmd(req) ((req)->cmd[0])
 #define MAX_NBD 128
 
+/* Define PARANOIA to include extra sanity checking code in here & driver */
+#define PARANOIA
+
 struct nbd_device {
-	int refcnt;	
 	int flags;
 	int harderror;		/* Code of hard error			*/
 #define NBD_READ_ONLY 0x0001
 #define NBD_WRITE_NOCHK 0x0002
 	struct socket * sock;
-	struct file * file; 		/* If == NULL, device is not ready, yet	*/
-	int magic;			/* FIXME: not if debugging is off	*/
-	struct list_head queue_head;	/* Requests are added here...			*/
-	struct semaphore queue_lock;
-};
+	struct file * file; 	/* If == NULL, device is not ready, yet	*/
+#ifdef PARANOIA
+	int magic;		/* FIXME: not if debugging is off	*/
 #endif
+	spinlock_t queue_lock;
+	struct list_head queue_head;/* Requests are added here...	*/
+	struct semaphore tx_lock;
+	struct gendisk *disk;
+	int blksize;
+	u64 bytesize;
+};
 
 /* This now IS in some kind of include file...	*/
 

@@ -7,22 +7,15 @@
  *  Re-organised Feb 1998 Russell King
  */
 
-#include <linux/fs.h>
-#include <linux/genhd.h>
-#include <linux/kernel.h>
-#include <linux/major.h>
-#include <linux/string.h>
-#include <linux/blk.h>
-
 #include "check.h"
 #include "osf.h"
 
-int osf_partition(struct gendisk *hd, kdev_t dev, unsigned long first_sector,
-		  int current_minor)
+int osf_partition(struct parsed_partitions *state, struct block_device *bdev)
 {
 	int i;
-	int mask = (1 << hd->minor_shift) - 1;
-	struct buffer_head *bh;
+	int slot = 1;
+	Sector sect;
+	unsigned char *data;
 	struct disklabel {
 		u32 d_magic;
 		u16 d_type,d_subtype;
@@ -56,31 +49,30 @@ int osf_partition(struct gendisk *hd, kdev_t dev, unsigned long first_sector,
 	} * label;
 	struct d_partition * partition;
 
-	if (!(bh = bread(dev,0,get_ptable_blocksize(dev)))) {
-		if (warn_no_part) printk("unable to read partition table\n");
+	data = read_dev_sector(bdev, 0, &sect);
+	if (!data)
 		return -1;
-	}
-	label = (struct disklabel *) (bh->b_data+64);
+
+	label = (struct disklabel *) (data+64);
 	partition = label->d_partitions;
-	if (label->d_magic != DISKLABELMAGIC) {
-		brelse(bh);
+	if (le32_to_cpu(label->d_magic) != DISKLABELMAGIC) {
+		put_dev_sector(sect);
 		return 0;
 	}
-	if (label->d_magic2 != DISKLABELMAGIC) {
-		brelse(bh);
+	if (le32_to_cpu(label->d_magic2) != DISKLABELMAGIC) {
+		put_dev_sector(sect);
 		return 0;
 	}
-	for (i = 0 ; i < label->d_npartitions; i++, partition++) {
-		if ((current_minor & mask) == 0)
+	for (i = 0 ; i < le16_to_cpu(label->d_npartitions); i++, partition++) {
+		if (slot == state->limit)
 		        break;
-		if (partition->p_size)
-			add_gd_partition(hd, current_minor,
-				first_sector+partition->p_offset,
-				partition->p_size);
-		current_minor++;
+		if (le32_to_cpu(partition->p_size))
+			put_partition(state, slot,
+				le32_to_cpu(partition->p_offset),
+				le32_to_cpu(partition->p_size));
+		slot++;
 	}
 	printk("\n");
-	brelse(bh);
+	put_dev_sector(sect);
 	return 1;
 }
-

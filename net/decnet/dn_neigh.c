@@ -18,6 +18,9 @@
  *                            forwarding now stands a good chance of
  *                            working.
  *     Steve Whitehouse     : Fixed neighbour states (for now anyway).
+ *     Steve Whitehouse     : Made error_report functions dummies. This
+ *                            is not the right place to return skbs.
+ *     Steve Whitehouse     : Convert to seq_file
  *
  */
 
@@ -31,9 +34,11 @@
 #include <linux/string.h>
 #include <linux/netfilter_decnet.h>
 #include <linux/spinlock.h>
+#include <linux/seq_file.h>
 #include <asm/atomic.h>
 #include <net/neighbour.h>
 #include <net/dst.h>
+#include <net/flow.h>
 #include <net/dn.h>
 #include <net/dn_dev.h>
 #include <net/dn_neigh.h>
@@ -52,81 +57,66 @@ static int dn_phase3_output(struct sk_buff *);
  * For talking to broadcast devices: Ethernet & PPP
  */
 static struct neigh_ops dn_long_ops = {
-	AF_DECnet,
-	NULL,
-	NULL,
-	dn_long_error_report,
-	dn_long_output,
-	dn_long_output,
-	dev_queue_xmit,
-	dev_queue_xmit
+	.family =		AF_DECnet,
+	.error_report =		dn_long_error_report,
+	.output =		dn_long_output,
+	.connected_output =	dn_long_output,
+	.hh_output =		dev_queue_xmit,
+	.queue_xmit =		dev_queue_xmit,
 };
 
 /*
  * For talking to pointopoint and multidrop devices: DDCMP and X.25
  */
 static struct neigh_ops dn_short_ops = {
-	AF_DECnet,
-	NULL,
-	NULL,
-	dn_short_error_report,
-	dn_short_output,
-	dn_short_output,
-	dev_queue_xmit,
-	dev_queue_xmit
+	.family =		AF_DECnet,
+	.error_report =		dn_short_error_report,
+	.output =		dn_short_output,
+	.connected_output =	dn_short_output,
+	.hh_output =		dev_queue_xmit,
+	.queue_xmit =		dev_queue_xmit,
 };
 
 /*
  * For talking to DECnet phase III nodes
  */
 static struct neigh_ops dn_phase3_ops = {
-	AF_DECnet,
-	NULL,
-	NULL,
-	dn_short_error_report, /* Can use short version here */
-	dn_phase3_output,
-	dn_phase3_output,
-	dev_queue_xmit,
-	dev_queue_xmit
+	.family =		AF_DECnet,
+	.error_report =		dn_short_error_report, /* Can use short version here */
+	.output =		dn_phase3_output,
+	.connected_output =	dn_phase3_output,
+	.hh_output =		dev_queue_xmit,
+	.queue_xmit =		dev_queue_xmit
 };
 
 struct neigh_table dn_neigh_table = {
-	NULL,
-	PF_DECnet,
-	sizeof(struct dn_neigh),
-	sizeof(dn_address),
-	dn_neigh_hash,
-	dn_neigh_construct,
-	NULL, /* pconstructor */
-	NULL, /* pdestructor */
-	NULL, /* proxyredo */
-	"dn_neigh_cache",
-	{ 
-		NULL,
-		NULL,
-		&dn_neigh_table,
-		0,
-		NULL,
-		NULL,
-		30 * HZ,	/* base_reachable_time */
-		1 * HZ,		/* retrans_time */
-		60 * HZ,	/* gc_staletime */
-		30 * HZ,	/* reachable_time */
-		5 * HZ,		/* delay_probe_time */
-		3,	/* queue_len */
-		0,	/* ucast_probes */
-		0,	/* app_probes */
-		0,	/* mcast_probes */
-		0,	/* anycast_delay */
-		0,	/* proxy_delay */
-		0,	/* proxy_qlen */
-		1 * HZ,	/* locktime */
+	.family =			PF_DECnet,
+	.entry_size =			sizeof(struct dn_neigh),
+	.key_len =			sizeof(dn_address),
+	.hash =				dn_neigh_hash,
+	.constructor =			dn_neigh_construct,
+	.id =				"dn_neigh_cache",
+	.parms ={
+		.tbl =			&dn_neigh_table,
+		.entries =		0,
+		.base_reachable_time =	30 * HZ,
+		.retrans_time =	1 * HZ,
+		.gc_staletime =	60 * HZ,
+		.reachable_time =		30 * HZ,
+		.delay_probe_time =	5 * HZ,
+		.queue_len =		3,
+		.ucast_probes =	0,
+		.app_probes =		0,
+		.mcast_probes =	0,
+		.anycast_delay =	0,
+		.proxy_delay =		0,
+		.proxy_qlen =		0,
+		.locktime =		1 * HZ,
 	},
-	30 * HZ,	/* gc_interval */
-	128,		/* gc_thresh1 */
-	512,		/* gc_thresh2 */
-	1024,		/* gc_thresh3 */
-	
+	.gc_interval =			30 * HZ,
+	.gc_thresh1 =			128,
+	.gc_thresh2 =			512,
+	.gc_thresh3 =			1024,
 };
 
 static u32 dn_neigh_hash(const void *pkey, const struct net_device *dev)
@@ -173,82 +163,47 @@ static int dn_neigh_construct(struct neighbour *neigh)
 		return -EINVAL;
 	}
 
-	dn->blksize = 230;
+	/*
+	 * Make an estimate of the remote block size by assuming that its
+	 * two less then the device mtu, which it true for ethernet (and
+	 * other things which support long format headers) since there is
+	 * an extra length field (of 16 bits) which isn't part of the
+	 * ethernet headers and which the DECnet specs won't admit is part
+	 * of the DECnet routing headers either.
+	 *
+	 * If we over estimate here its no big deal, the NSP negotiations
+	 * will prevent us from sending packets which are too large for the
+	 * remote node to handle. In any case this figure is normally updated
+	 * by a hello message in most cases.
+	 */
+	dn->blksize = dev->mtu - 2;
 
 	return 0;
 }
 
 static void dn_long_error_report(struct neighbour *neigh, struct sk_buff *skb)
 {
-	struct dn_skb_cb *cb = (struct dn_skb_cb *)skb->cb;
-	unsigned char *ptr;
-
 	printk(KERN_DEBUG "dn_long_error_report: called\n");
-
-	if (!(cb->rt_flags & DN_RT_F_RQR)) {
-		kfree_skb(skb);
-		return;
-	}
-
-	skb_push(skb, skb->data - skb->nh.raw);
-	ptr = skb->data;
-
-	*(unsigned short *)ptr = dn_htons(skb->len - 2);
-	ptr += 2;
-
-	if (*ptr & DN_RT_F_PF) {
-		char padlen = (*ptr & ~DN_RT_F_PF);
-		ptr += padlen;
-	}
-
-	*ptr++ |= (cb->rt_flags & ~DN_RT_F_RQR) | DN_RT_F_RTS;
-
-	ptr += 2;
-	dn_dn2eth(ptr, dn_ntohs(cb->src));
-	ptr += 8;
-	dn_dn2eth(ptr, dn_ntohs(cb->dst));
-	ptr += 6;
-	*ptr = 0;
-
-	skb->dst->neighbour->ops->queue_xmit(skb);
+	kfree_skb(skb);
 }
 
 
 static void dn_short_error_report(struct neighbour *neigh, struct sk_buff *skb)
 {
-	struct dn_skb_cb *cb = (struct dn_skb_cb *)skb->cb;
-	unsigned char *ptr;
-
 	printk(KERN_DEBUG "dn_short_error_report: called\n");
-
-	if (!(cb->rt_flags & DN_RT_F_RQR)) {
-		kfree_skb(skb);
-		return;
-	}
-
-	skb_push(skb, skb->data - skb->nh.raw);
-	ptr = skb->data;
-
-	*(unsigned short *)ptr = dn_htons(skb->len - 2);
-	ptr += 2;
-	*ptr++ = (cb->rt_flags & ~DN_RT_F_RQR) | DN_RT_F_RTS;
-
-	*(dn_address *)ptr = cb->src;
-	ptr += 2;
-	*(dn_address *)ptr = cb->dst;
-	ptr += 2;
-	*ptr = 0;
-
-	skb->dst->neighbour->ops->queue_xmit(skb);
+	kfree_skb(skb);
 }
 
 static int dn_neigh_output_packet(struct sk_buff *skb)
 {
 	struct dst_entry *dst = skb->dst;
+	struct dn_route *rt = (struct dn_route *)dst;
 	struct neighbour *neigh = dst->neighbour;
 	struct net_device *dev = neigh->dev;
+	char mac_addr[ETH_ALEN];
 
-	if (!dev->hard_header || dev->hard_header(skb, dev, ntohs(skb->protocol), neigh->ha, NULL, skb->len) >= 0)
+	dn_dn2eth(mac_addr, rt->rt_local_src);
+	if (!dev->hard_header || dev->hard_header(skb, dev, ntohs(skb->protocol), neigh->ha, mac_addr, skb->len) >= 0)
 		return neigh->ops->queue_xmit(skb);
 
 	if (net_ratelimit())
@@ -266,7 +221,7 @@ static int dn_long_output(struct sk_buff *skb)
 	int headroom = dev->hard_header_len + sizeof(struct dn_long_packet) + 3;
 	unsigned char *data;
 	struct dn_long_packet *lp;
-	struct dn_skb_cb *cb = (struct dn_skb_cb *)skb->cb;
+	struct dn_skb_cb *cb = DN_SKB_CB(skb);
 
 
 	if (skb_headroom(skb) < headroom) {
@@ -312,7 +267,7 @@ static int dn_short_output(struct sk_buff *skb)
 	int headroom = dev->hard_header_len + sizeof(struct dn_short_packet) + 2;
 	struct dn_short_packet *sp;
 	unsigned char *data;
-	struct dn_skb_cb *cb = (struct dn_skb_cb *)skb->cb;
+	struct dn_skb_cb *cb = DN_SKB_CB(skb);
 
 
         if (skb_headroom(skb) < headroom) {
@@ -355,7 +310,7 @@ static int dn_phase3_output(struct sk_buff *skb)
 	int headroom = dev->hard_header_len + sizeof(struct dn_short_packet) + 2;
 	struct dn_short_packet *sp;
 	unsigned char *data;
-	struct dn_skb_cb *cb = (struct dn_skb_cb *)skb->cb;
+	struct dn_skb_cb *cb = DN_SKB_CB(skb);
 
 	if (skb_headroom(skb) < headroom) {
 		struct sk_buff *skb2 = skb_realloc_headroom(skb, headroom);
@@ -391,7 +346,7 @@ static int dn_phase3_output(struct sk_buff *skb)
  * basically does a neigh_lookup(), but without comparing the device
  * field. This is required for the On-Ethernet cache
  */
-struct neighbour *dn_neigh_lookup(struct neigh_table *tbl, void *ptr)
+struct neighbour *dn_neigh_lookup(struct neigh_table *tbl, const void *ptr)
 {
 	struct neighbour *neigh;
 	u32 hash_val;
@@ -527,8 +482,6 @@ int dn_neigh_endnode_hello(struct sk_buff *skb)
 	return 0;
 }
 
-
-#ifdef CONFIG_DECNET_ROUTER
 static char *dn_find_slot(char *base, int max, int priority)
 {
 	int i;
@@ -587,80 +540,176 @@ int dn_neigh_elist(struct net_device *dev, unsigned char *ptr, int n)
 
 	return t;
 }
-#endif /* CONFIG_DECNET_ROUTER */
-
 
 
 #ifdef CONFIG_PROC_FS
-static int dn_neigh_get_info(char *buffer, char **start, off_t offset, int length)
+
+struct dn_neigh_iter_state {
+	int bucket;
+};
+
+static struct neighbour *neigh_get_first(struct seq_file *seq)
 {
-        int len     = 0;
-        off_t pos   = 0;
-        off_t begin = 0;
-	struct neighbour *n;
-	int i;
-	char buf[DN_ASCBUF_LEN];
+	struct dn_neigh_iter_state *state = seq->private;
+	struct neighbour *n = NULL;
 
-	len += sprintf(buffer + len, "Addr    Flags State Use Blksize Dev\n");
-
-	for(i=0;i <= NEIGH_HASHMASK; i++) {
-		read_lock_bh(&dn_neigh_table.lock);
-		n = dn_neigh_table.hash_buckets[i];
-		for(; n != NULL; n = n->next) {
-			struct dn_neigh *dn = (struct dn_neigh *)n;
-
-			read_lock(&n->lock);
-			len += sprintf(buffer+len, "%-7s %s%s%s   %02x    %02d  %07ld %-8s\n",
-					dn_addr2asc(dn_ntohs(dn->addr), buf),
-					(dn->flags&DN_NDFLAG_R1) ? "1" : "-",
-					(dn->flags&DN_NDFLAG_R2) ? "2" : "-",
-					(dn->flags&DN_NDFLAG_P3) ? "3" : "-",
-					dn->n.nud_state,
-					atomic_read(&dn->n.refcnt),
-					dn->blksize,
-					(dn->n.dev) ? dn->n.dev->name : "?");
-			read_unlock(&n->lock);
-
-			pos = begin + len;
-
-                	if (pos < offset) {
-                        	len = 0;
-                        	begin = pos;
-                	}
-
-                	if (pos > offset + length) {
-				read_unlock_bh(&dn_neigh_table.lock);
-                       		goto done;
-			}
-		}
-		read_unlock_bh(&dn_neigh_table.lock);
+	for(state->bucket = 0;
+	    state->bucket <= NEIGH_HASHMASK;
+	    ++state->bucket) {
+		n = dn_neigh_table.hash_buckets[state->bucket];
+		if (n)
+			break;
 	}
 
-done:
-
-        *start = buffer + (offset - begin);
-        len   -= offset - begin;
-
-        if (len > length) len = length;
-
-        return len;
+	return n;
 }
+
+static struct neighbour *neigh_get_next(struct seq_file *seq,
+					struct neighbour *n)
+{
+	struct dn_neigh_iter_state *state = seq->private;
+
+	n = n->next;
+try_again:
+	if (n)
+		goto out;
+	if (++state->bucket > NEIGH_HASHMASK)
+		goto out;
+	n = dn_neigh_table.hash_buckets[state->bucket];
+	goto try_again;
+out:
+	return n;
+}
+
+static struct neighbour *neigh_get_idx(struct seq_file *seq, loff_t *pos)
+{
+	struct neighbour *n = neigh_get_first(seq);
+
+	if (n)
+		while(*pos && (n = neigh_get_next(seq, n)))
+			--*pos;
+	return *pos ? NULL : n;
+}
+
+static void *dn_neigh_get_idx(struct seq_file *seq, loff_t pos)
+{
+	void *rc;
+	read_lock_bh(&dn_neigh_table.lock);
+	rc = neigh_get_idx(seq, &pos);
+	if (!rc) {
+		read_unlock_bh(&dn_neigh_table.lock);
+	}
+	return rc;
+}
+
+static void *dn_neigh_seq_start(struct seq_file *seq, loff_t *pos)
+{
+	return *pos ? dn_neigh_get_idx(seq, *pos - 1) : SEQ_START_TOKEN;
+}
+
+static void *dn_neigh_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	void *rc;
+
+
+	if (v == SEQ_START_TOKEN) {
+		rc = dn_neigh_get_idx(seq, 0);
+		goto out;
+	}
+
+	rc = neigh_get_next(seq, v);
+	if (rc)
+		goto out;
+	read_unlock_bh(&dn_neigh_table.lock);
+out:
+	++*pos;
+	return rc;
+}
+
+static void dn_neigh_seq_stop(struct seq_file *seq, void *v)
+{
+	if (v && v != SEQ_START_TOKEN)
+		read_unlock_bh(&dn_neigh_table.lock);
+}
+
+static inline void dn_neigh_format_entry(struct seq_file *seq,
+					 struct neighbour *n)
+{
+	struct dn_neigh *dn = (struct dn_neigh *)n;
+	char buf[DN_ASCBUF_LEN];
+
+	read_lock(&n->lock);
+	seq_printf(seq, "%-7s %s%s%s   %02x    %02d  %07ld %-8s\n",
+		   dn_addr2asc(dn_ntohs(dn->addr), buf),
+		   (dn->flags&DN_NDFLAG_R1) ? "1" : "-",
+		   (dn->flags&DN_NDFLAG_R2) ? "2" : "-",
+		   (dn->flags&DN_NDFLAG_P3) ? "3" : "-",
+		   dn->n.nud_state,
+		   atomic_read(&dn->n.refcnt),
+		   dn->blksize,
+		   (dn->n.dev) ? dn->n.dev->name : "?");
+	read_unlock(&n->lock);
+}
+
+static int dn_neigh_seq_show(struct seq_file *seq, void *v)
+{
+	if (v == SEQ_START_TOKEN) {
+		seq_puts(seq, "Addr    Flags State Use Blksize Dev\n");
+	} else {
+		dn_neigh_format_entry(seq, v);
+	}
+
+	return 0;
+}
+
+static struct seq_operations dn_neigh_seq_ops = {
+	.start = dn_neigh_seq_start,
+	.next  = dn_neigh_seq_next,
+	.stop  = dn_neigh_seq_stop,
+	.show  = dn_neigh_seq_show,
+};
+
+static int dn_neigh_seq_open(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq;
+	int rc = -ENOMEM;
+	struct dn_neigh_iter_state *s = kmalloc(sizeof(*s), GFP_KERNEL);
+
+	if (!s)
+		goto out;
+
+	rc = seq_open(file, &dn_neigh_seq_ops);
+	if (rc)
+		goto out_kfree;
+
+	seq          = file->private_data;
+	seq->private = s;
+	memset(s, 0, sizeof(*s));
+out:
+	return rc;
+out_kfree:
+	kfree(s);
+	goto out;
+}
+
+static struct file_operations dn_neigh_seq_fops = {
+	.owner		= THIS_MODULE,
+	.open		= dn_neigh_seq_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release_private,
+};
 
 #endif
 
 void __init dn_neigh_init(void)
 {
 	neigh_table_init(&dn_neigh_table);
-
-#ifdef CONFIG_PROC_FS
-	proc_net_create("decnet_neigh",0,dn_neigh_get_info);
-#endif /* CONFIG_PROC_FS */
+	proc_net_fops_create("decnet_neigh", S_IRUGO, &dn_neigh_seq_fops);
 }
 
 void __exit dn_neigh_cleanup(void)
 {
-#ifdef CONFIG_PROC_FS
 	proc_net_remove("decnet_neigh");
-#endif /* CONFIG_PROC_FS */
 	neigh_table_clear(&dn_neigh_table);
 }

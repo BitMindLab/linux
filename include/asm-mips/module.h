@@ -1,11 +1,14 @@
-#ifndef _ASM_MIPS_MODULE_H
-#define _ASM_MIPS_MODULE_H
-/*
- * This file contains the mips architecture specific module code.
- */
+#ifndef _ASM_MODULE_H
+#define _ASM_MODULE_H
 
-#define module_map(x)		vmalloc(x)
-#define module_unmap(x)		vfree(x)
-#define module_arch_init(x)	(0)
+struct mod_arch_specific {
+	/* Data Bus Error exception tables */
+	const struct exception_table_entry *dbe_table_start;
+	const struct exception_table_entry *dbe_table_end;
+};
 
-#endif /* _ASM_MIPS_MODULE_H */
+#define Elf_Shdr Elf32_Shdr
+#define Elf_Sym Elf32_Sym
+#define Elf_Ehdr Elf32_Ehdr
+
+#endif /* _ASM_MODULE_H */

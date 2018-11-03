@@ -7,14 +7,15 @@
  *  (For directory without EMD file).
  */
 
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/msdos_fs.h>
 #include <linux/errno.h>
 #include <linux/stat.h>
 #include <linux/limits.h>
 #include <linux/umsdos_fs.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
+#include <linux/smp_lock.h>
 
 #include <asm/uaccess.h>
 
@@ -32,7 +33,7 @@ struct RDIR_FILLDIR {
 static int rdir_filldir (	void *buf,
 				const char *name,
 				int name_len,
-				off_t offset,
+				loff_t offset,
 				ino_t ino,
 				unsigned int d_type)
 {
@@ -63,11 +64,15 @@ static int UMSDOS_rreaddir (struct file *filp, void *dirbuf, filldir_t filldir)
 {
 	struct inode *dir = filp->f_dentry->d_inode;
 	struct RDIR_FILLDIR bufk;
+	int ret;
 
+	lock_kernel();
 	bufk.filldir = filldir;
 	bufk.dirbuf = dirbuf;
 	bufk.real_root = pseudo_root && (dir == saved_root->d_inode);
-	return fat_readdir (filp, &bufk, rdir_filldir);
+	ret = fat_readdir (filp, &bufk, rdir_filldir);
+	unlock_kernel();
+	return ret;
 }
 
 
@@ -96,7 +101,7 @@ struct dentry *umsdos_rlookup_x ( struct inode *dir, struct dentry *dentry, int 
 		goto out;
 	}
 
-	ret = msdos_lookup (dir, dentry);
+	ret = msdos_lookup (dir, dentry, NULL);
 	if (ret) {
 		printk(KERN_WARNING
 			"umsdos_rlookup_x: %s/%s failed, ret=%ld\n",
@@ -111,6 +116,9 @@ struct dentry *umsdos_rlookup_x ( struct inode *dir, struct dentry *dentry, int 
 		 */
 Printk ((KERN_DEBUG "umsdos_rlookup_x: patch_dentry_inode %s/%s\n",
 dentry->d_parent->d_name.name, dentry->d_name.name));
+/* only patch if needed (because we get called even for lookup
+   (not only rlookup) stuff sometimes, like in umsdos_covered() */
+		if (UMSDOS_I(dentry->d_inode)->i_patched == 0)	
 		umsdos_patch_dentry_inode(dentry, 0);
 
 	}
@@ -121,7 +129,7 @@ out:
 }
 
 
-struct dentry *UMSDOS_rlookup ( struct inode *dir, struct dentry *dentry)
+struct dentry *UMSDOS_rlookup ( struct inode *dir, struct dentry *dentry, struct nameidata *nd)
 {
 	return umsdos_rlookup_x (dir, dentry, 0);
 }
@@ -223,18 +231,18 @@ out:
  */
 struct file_operations umsdos_rdir_operations =
 {
-	read:		generic_read_dir,
-	readdir:	UMSDOS_rreaddir,
-	ioctl:		UMSDOS_ioctl_dir,
+	.read		= generic_read_dir,
+	.readdir	= UMSDOS_rreaddir,
+	.ioctl		= UMSDOS_ioctl_dir,
 };
 
 struct inode_operations umsdos_rdir_inode_operations =
 {
-	create:		msdos_create,
-	lookup:		UMSDOS_rlookup,
-	unlink:		msdos_unlink,
-	mkdir:		msdos_mkdir,
-	rmdir:		UMSDOS_rrmdir,
-	rename:		msdos_rename,
-	setattr:	UMSDOS_notify_change,
+	.create		= msdos_create,
+	.lookup		= UMSDOS_rlookup,
+	.unlink		= msdos_unlink,
+	.mkdir		= msdos_mkdir,
+	.rmdir		= UMSDOS_rrmdir,
+	.rename		= msdos_rename,
+	.setattr	= UMSDOS_notify_change,
 };

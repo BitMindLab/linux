@@ -45,7 +45,7 @@ static void smart4_submit_command(ctlr_info_t *h, cmdlist_t *c)
 }
 
 /*  
- *  This card is the oposite of the other cards.  
+ *  This card is the opposite of the other cards.  
  *   0 turns interrupts on... 
  *   0x08 turns them off... 
  */
@@ -252,6 +252,9 @@ static unsigned long smart1_completed(ctlr_info_t *h)
 
 		outb(CHANNEL_CLEAR, h->ioaddr + SMART1_LOCAL_DOORBELL);
 
+		/*
+		 * this is x86 (actually compaq x86) only, so it's ok
+		 */
 		if (cmd) ((cmdlist_t*)bus_to_virt(cmd))->req.hdr.rcode = status;
 	} else {
 		cmd = 0;

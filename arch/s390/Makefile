@@ -1,4 +1,4 @@
-
+#
 # s390/Makefile
 #
 # This file is included by the global makefile so that you can add your own
@@ -13,56 +13,60 @@
 # Copyright (C) 1994 by Linus Torvalds
 #
 
-LD=$(CROSS_COMPILE)ld -m elf_s390
-OBJCOPY=$(CROSS_COMPILE)objcopy -O binary -R .note -R .comment -S
-LDFLAGS=-e start
-LINKFLAGS =-T $(TOPDIR)/arch/s390/vmlinux.lds $(LDFLAGS)
+ifdef CONFIG_ARCH_S390_31
+LDFLAGS		:= -m elf_s390
+CFLAGS		+= -m31
+AFLAGS		+= -m31
+UTS_MACHINE	:= s390
+endif
 
-CFLAGS_PIPE := -pipe
-CFLAGS_NSR  := -fno-strength-reduce
-CFLAGS := $(CFLAGS) $(CFLAGS_PIPE) $(CFLAGS_NSR)
+ifdef CONFIG_ARCH_S390X
+LDFLAGS		:= -m elf64_s390
+MODFLAGS	+= -fpic -D__PIC__
+CFLAGS		+= -m64
+AFLAGS		+= -m64
+UTS_MACHINE	:= s390x
+endif
 
-HEAD := arch/s390/kernel/head.o arch/s390/kernel/init_task.o
+cflags-$(CONFIG_MARCH_G5)   += $(call check_gcc,-march=g5,)
+cflags-$(CONFIG_MARCH_Z900) += $(call check_gcc,-march=z900,)
+cflags-$(CONFIG_MARCH_Z990) += $(call check_gcc,-march=z990,)
 
-SUBDIRS := $(SUBDIRS) arch/s390/mm arch/s390/kernel arch/s390/lib \
-           drivers/s390
-CORE_FILES := arch/s390/mm/mm.o arch/s390/kernel/kernel.o $(CORE_FILES) \
-           drivers/s390/io.o
-LIBS := $(TOPDIR)/arch/s390/lib/lib.a $(LIBS) $(TOPDIR)/arch/s390/lib/lib.a
+CFLAGS		+= $(cflags-y)
+CFLAGS		+= $(call check_gcc,-finline-limit=10000,)
+CFLAGS 		+= -pipe -fno-strength-reduce -Wno-sign-compare 
 
-all: image listing
+OBJCOPYFLAGS	:= -O binary
+LDFLAGS_vmlinux := -e start
 
-listing: vmlinux
-	@$(MAKEBOOT) listing
+head-$(CONFIG_ARCH_S390_31)	+= arch/$(ARCH)/kernel/head.o
+head-$(CONFIG_ARCH_S390X)	+= arch/$(ARCH)/kernel/head64.o
+head-y				+= arch/$(ARCH)/kernel/init_task.o
 
-arch/s390/kernel: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=arch/s390/kernel
+core-y		+= arch/$(ARCH)/mm/ arch/$(ARCH)/kernel/
+libs-y		+= arch/$(ARCH)/lib/
+drivers-y	+= drivers/s390/
+drivers-$(CONFIG_MATHEMU) += arch/$(ARCH)/math-emu/
 
-arch/s390/mm: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=arch/s390/mm
+boot		:= arch/$(ARCH)/boot
 
-drivers/s390: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=drivers/s390
+all: image
 
-MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
+install: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $@
 
-MAKESILO = $(MAKE) -C arch/$(ARCH)/tools/silo
-
-MAKEDASDFMT = $(MAKE) -C arch/$(ARCH)/tools/dasdfmt
-
-silo:
-	@$(MAKESILO) silo
-
-dasdfmt:
-	@$(MAKEDASDFMT) dasdfmt
-
-image: vmlinux 
-	@$(MAKEBOOT) image
+image: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
 archclean:
-	@$(MAKEBOOT) clean
+	$(Q)$(MAKE) $(clean)=$(boot)
 
-archmrproper:
+prepare: include/asm-$(ARCH)/offsets.h
 
-archdep:
-	@$(MAKEBOOT) dep
+arch/$(ARCH)/kernel/asm-offsets.s: include/asm include/linux/version.h \
+				   include/config/MARKER
+
+include/asm-$(ARCH)/offsets.h: arch/$(ARCH)/kernel/asm-offsets.s
+	$(call filechk,gen-asm-offsets)
+
+CLEAN_FILES += include/asm-$(ARCH)/offsets.h

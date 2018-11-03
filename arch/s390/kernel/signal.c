@@ -2,7 +2,7 @@
  *  arch/s390/kernel/signal.c
  *
  *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright (C) 1999,2000 IBM Deutschland Entwicklung GmbH, IBM Corporation
  *    Author(s): Denis Joseph Barrow (djbarrow@de.ibm.com,barrow_dj@yahoo.com)
  *
  *    Based on Intel version
@@ -12,6 +12,7 @@
  *  1997-11-28  Modified for POSIX.1b signals by Richard Henderson
  */
 
+#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
@@ -23,57 +24,53 @@
 #include <linux/ptrace.h>
 #include <linux/unistd.h>
 #include <linux/stddef.h>
+#include <linux/tty.h>
+#include <linux/personality.h>
+#include <linux/binfmts.h>
 #include <asm/ucontext.h>
 #include <asm/uaccess.h>
-
-#define DEBUG_SIG 0
+#include <asm/lowcore.h>
 
 #define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
 
-/* pretcode & sig are used to store the return addr on Intel
-   & the signal no as the first parameter we do this differently
-   using gpr14 & gpr2. */
-
-#define SIGFRAME_COMMON \
-__u8     callee_used_stack[__SIGNAL_FRAMESIZE]; \
-struct sigcontext sc; \
-sigregs sregs; \
-__u8 retcode[S390_SYSCALL_SIZE];
 
 typedef struct 
 {
-	SIGFRAME_COMMON
+	__u8 callee_used_stack[__SIGNAL_FRAMESIZE];
+	struct sigcontext sc;
+	_sigregs sregs;
+	__u8 retcode[S390_SYSCALL_SIZE];
 } sigframe;
 
 typedef struct 
 {
-	SIGFRAME_COMMON
+	__u8 callee_used_stack[__SIGNAL_FRAMESIZE];
+	__u8 retcode[S390_SYSCALL_SIZE];
 	struct siginfo info;
 	struct ucontext uc;
 } rt_sigframe;
 
-asmlinkage int sys_wait4(pid_t pid, unsigned long *stat_addr,
-			 int options, unsigned long *ru);
-asmlinkage int FASTCALL(do_signal(struct pt_regs *regs, sigset_t *oldset));
+int do_signal(struct pt_regs *regs, sigset_t *oldset);
 
 /*
  * Atomically swap in the new signal mask, and wait for a signal.
  */
 asmlinkage int
-sys_sigsuspend(struct pt_regs * regs,int history0, int history1, old_sigset_t mask)
+sys_sigsuspend(struct pt_regs * regs, int history0, int history1,
+	       old_sigset_t mask)
 {
 	sigset_t saveset;
 
 	mask &= _BLOCKABLE;
-	spin_lock_irq(&current->sigmask_lock);
+	spin_lock_irq(&current->sighand->siglock);
 	saveset = current->blocked;
 	siginitset(&current->blocked, mask);
-	recalc_sigpending(current);
-	spin_unlock_irq(&current->sigmask_lock);
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
 	regs->gprs[2] = -EINTR;
 
 	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		schedule();
 		if (do_signal(regs, &saveset))
 			return -EINTR;
@@ -93,15 +90,15 @@ sys_rt_sigsuspend(struct pt_regs * regs,sigset_t *unewset, size_t sigsetsize)
 		return -EFAULT;
 	sigdelsetmask(&newset, ~_BLOCKABLE);
 
-	spin_lock_irq(&current->sigmask_lock);
+	spin_lock_irq(&current->sighand->siglock);
 	saveset = current->blocked;
 	current->blocked = newset;
-	recalc_sigpending(current);
-	spin_unlock_irq(&current->sigmask_lock);
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
 	regs->gprs[2] = -EINTR;
 
 	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		schedule();
 		if (do_signal(regs, &saveset))
 			return -EINTR;
@@ -141,109 +138,106 @@ sys_sigaction(int sig, const struct old_sigaction *act,
 }
 
 asmlinkage int
-sys_sigaltstack(const stack_t *uss, stack_t *uoss)
+sys_sigaltstack(const stack_t *uss, stack_t *uoss, struct pt_regs *regs)
 {
-	struct pt_regs *regs = (struct pt_regs *) &uss;
 	return do_sigaltstack(uss, uoss, regs->gprs[15]);
 }
 
 
 
-
-static int save_sigregs(struct pt_regs *regs,sigregs *sregs)
+/* Returns non-zero on fault. */
+static int save_sigregs(struct pt_regs *regs, _sigregs *sregs)
 {
 	int err;
-	s390_fp_regs fpregs;
   
-	err = __copy_to_user(&sregs->regs,regs,sizeof(s390_regs_common));
-	if(!err)
-	{
-		save_fp_regs(&fpregs);
-		err=__copy_to_user(&sregs->fpregs,&fpregs,sizeof(fpregs));
-	}
-	return(err);
-	
+	err = __copy_to_user(&sregs->regs, regs, sizeof(_s390_regs_common));
+	if (err != 0)
+		return err;
+	/* 
+	 * We have to store the fp registers to current->thread.fp_regs
+	 * to merge them with the emulated registers.
+	 */
+	save_fp_regs(&current->thread.fp_regs);
+	return __copy_to_user(&sregs->fpregs, &current->thread.fp_regs,
+			      sizeof(s390_fp_regs));
 }
 
-static int restore_sigregs(struct pt_regs *regs,sigregs *sregs)
+/* Returns positive number on error */
+static int restore_sigregs(struct pt_regs *regs, _sigregs *sregs)
 {
 	int err;
-	s390_fp_regs fpregs;
-	psw_t saved_psw=regs->psw;
-	err=__copy_from_user(regs,&sregs->regs,sizeof(s390_regs_common));
-	if(!err)
-	{
-		regs->orig_gpr2 = -1;		/* disable syscall checks */
-		regs->psw.mask=(saved_psw.mask&~PSW_MASK_DEBUGCHANGE)|
-		(regs->psw.mask&PSW_MASK_DEBUGCHANGE);
-		regs->psw.addr=(saved_psw.addr&~PSW_ADDR_DEBUGCHANGE)|
-		(regs->psw.addr&PSW_ADDR_DEBUGCHANGE);
-		err=__copy_from_user(&fpregs,&sregs->fpregs,sizeof(fpregs));
-		if(!err)
-			restore_fp_regs(&fpregs);
-	}
-	return(err);
+
+	err = __copy_from_user(regs, &sregs->regs, sizeof(_s390_regs_common));
+	regs->psw.mask = PSW_USER_BITS | (regs->psw.mask & PSW_MASK_CC);
+	regs->psw.addr |= PSW_ADDR_AMODE;
+	if (err)
+		return err;
+
+	err = __copy_from_user(&current->thread.fp_regs, &sregs->fpregs,
+			       sizeof(s390_fp_regs));
+	current->thread.fp_regs.fpc &= FPC_VALID_MASK;
+	if (err)
+		return err;
+
+	restore_fp_regs(&current->thread.fp_regs);
+	regs->trap = -1;	/* disable syscall checks */
+	return 0;
 }
 
-static int
-restore_sigcontext(struct sigcontext *sc, pt_regs *regs,
-		 sigregs *sregs,sigset_t *set)
-{
-	unsigned int err;
-
-	err=restore_sigregs(regs,sregs);
-	if(!err)
-		err=__copy_from_user(&set->sig,&sc->oldmask,SIGMASK_COPY_SIZE);
-		return(err);
-}
-
-int sigreturn_common(struct pt_regs *regs,int framesize)
+asmlinkage long sys_sigreturn(struct pt_regs *regs)
 {
 	sigframe *frame = (sigframe *)regs->gprs[15];
 	sigset_t set;
 
 	if (verify_area(VERIFY_READ, frame, sizeof(*frame)))
-		return -1;
-	if (restore_sigcontext(&frame->sc,regs,&frame->sregs,&set))
-	        return -1;
+		goto badframe;
+	if (__copy_from_user(&set.sig, &frame->sc.oldmask, _SIGMASK_COPY_SIZE))
+		goto badframe;
+
 	sigdelsetmask(&set, ~_BLOCKABLE);
-	spin_lock_irq(&current->sigmask_lock);
+	spin_lock_irq(&current->sighand->siglock);
 	current->blocked = set;
-	recalc_sigpending(current);
-	spin_unlock_irq(&current->sigmask_lock);
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
+
+	if (restore_sigregs(regs, &frame->sregs))
+		goto badframe;
+
+	return regs->gprs[2];
+
+badframe:
+	force_sig(SIGSEGV, current);
 	return 0;
 }
 
-asmlinkage int sys_sigreturn(struct pt_regs *regs)
-{
-
-	if (sigreturn_common(regs,sizeof(sigframe)))
-		goto badframe;
-	return regs->gprs[2];
-
-badframe:
-	force_sig(SIGSEGV, current);
-	return 0;
-}	
-
-asmlinkage int sys_rt_sigreturn(struct pt_regs *regs)
+asmlinkage long sys_rt_sigreturn(struct pt_regs *regs)
 {
 	rt_sigframe *frame = (rt_sigframe *)regs->gprs[15];
-	stack_t st;
+	sigset_t set;
 
-	if (sigreturn_common(regs,sizeof(rt_sigframe)))
+	if (verify_area(VERIFY_READ, frame, sizeof(*frame)))
 		goto badframe;
-	if (__copy_from_user(&st, &frame->uc.uc_stack, sizeof(st)))
+	if (__copy_from_user(&set.sig, &frame->uc.uc_sigmask, sizeof(set)))
 		goto badframe;
+
+	sigdelsetmask(&set, ~_BLOCKABLE);
+	spin_lock_irq(&current->sighand->siglock);
+	current->blocked = set;
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
+
+	if (restore_sigregs(regs, &frame->uc.uc_mcontext))
+		goto badframe;
+
 	/* It is more difficult to avoid calling this function than to
 	   call it and ignore errors.  */
-	do_sigaltstack(&st, NULL, regs->gprs[15]);
+	do_sigaltstack(&frame->uc.uc_stack, NULL, regs->gprs[15]);
 	return regs->gprs[2];
 
 badframe:
 	force_sig(SIGSEGV, current);
 	return 0;
-}	
+}
 
 /*
  * Set up a signal frame.
@@ -277,55 +271,60 @@ get_sigframe(struct k_sigaction *ka, struct pt_regs * regs, size_t frame_size)
 	return (void *)((sp - frame_size) & -8ul);
 }
 
-static void *setup_frame_common(int sig, struct k_sigaction *ka,
-			sigset_t *set, struct pt_regs * regs,
-				int frame_size,u16 retcode)
+static inline int map_signal(int sig)
 {
-	sigframe *frame;
-	int err;
-
-	frame = get_sigframe(ka, regs,frame_size);
-	if (!access_ok(VERIFY_WRITE, frame,frame_size))
-		return 0;
-	err = save_sigregs(regs,&frame->sregs);
-	if(!err)
-		err=__put_user(&frame->sregs,&frame->sc.sregs);
-	if(!err)
-
-		err=__copy_to_user(&frame->sc.oldmask,&set->sig,SIGMASK_COPY_SIZE);
-	if(!err)
-	{
-		regs->gprs[2]=(current->exec_domain
-		           && current->exec_domain->signal_invmap
-		           && sig < 32
-		           ? current->exec_domain->signal_invmap[sig]
-		           : sig);
-		/* Set up registers for signal handler */
-		regs->gprs[15] = (addr_t)frame;
-		regs->psw.addr = FIX_PSW(ka->sa.sa_handler);
-	}
-	/* Set up to return from userspace.  If provided, use a stub
-	   already in userspace.  */
-	if (ka->sa.sa_flags & SA_RESTORER) {
-                regs->gprs[14] = FIX_PSW(ka->sa.sa_restorer);
-	} else {
-                regs->gprs[14] = FIX_PSW(frame->retcode);
-		err |= __put_user(retcode, (u16 *)(frame->retcode));
-	}
-	return(err ? 0:frame);
+	if (current_thread_info()->exec_domain
+	    && current_thread_info()->exec_domain->signal_invmap
+	    && sig < 32)
+		return current_thread_info()->exec_domain->signal_invmap[sig];
+	else
+		return sig;
 }
 
 static void setup_frame(int sig, struct k_sigaction *ka,
 			sigset_t *set, struct pt_regs * regs)
 {
-
-	if(!setup_frame_common(sig,ka,set,regs,sizeof(sigframe),
-		    (S390_SYSCALL_OPCODE|__NR_sigreturn)))
+	sigframe *frame = get_sigframe(ka, regs, sizeof(sigframe));
+	if (!access_ok(VERIFY_WRITE, frame, sizeof(sigframe)))
 		goto give_sigsegv;
-#if DEBUG_SIG
-	printk("SIG deliver (%s:%d): sp=%p pc=%p ra=%p\n",
-		current->comm, current->pid, frame, regs->eip, frame->pretcode);
-#endif
+
+	if (__copy_to_user(&frame->sc.oldmask, &set->sig, _SIGMASK_COPY_SIZE))
+		goto give_sigsegv;
+
+	if (save_sigregs(regs, &frame->sregs))
+		goto give_sigsegv;
+	if (__put_user(&frame->sregs, &frame->sc.sregs))
+		goto give_sigsegv;
+
+	/* Set up to return from userspace.  If provided, use a stub
+	   already in userspace.  */
+	if (ka->sa.sa_flags & SA_RESTORER) {
+                regs->gprs[14] = (unsigned long)
+			ka->sa.sa_restorer | PSW_ADDR_AMODE;
+	} else {
+                regs->gprs[14] = (unsigned long)
+			frame->retcode | PSW_ADDR_AMODE;
+		if (__put_user(S390_SYSCALL_OPCODE | __NR_sigreturn, 
+	                       (u16 *)(frame->retcode)))
+			goto give_sigsegv;
+	}
+
+	/* Set up backchain. */
+	if (__put_user(regs->gprs[15], (addr_t *) frame))
+		goto give_sigsegv;
+
+	/* Set up registers for signal handler */
+	regs->gprs[15] = (unsigned long) frame;
+	regs->psw.addr = (unsigned long) ka->sa.sa_handler | PSW_ADDR_AMODE;
+	regs->psw.mask = PSW_USER_BITS;
+
+	regs->gprs[2] = map_signal(sig);
+	regs->gprs[3] = (unsigned long) &frame->sc;
+
+	/* We forgot to include these in the sigcontext.
+	   To avoid breaking binary compatibility, they are passed as args. */
+	regs->gprs[4] = current->thread.trap_no;
+	regs->gprs[5] = current->thread.prot_addr;
 	return;
 
 give_sigsegv:
@@ -337,33 +336,50 @@ give_sigsegv:
 static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 			   sigset_t *set, struct pt_regs * regs)
 {
-	rt_sigframe *frame;
-	addr_t      orig_sp=regs->gprs[15];
-	int err;
-
-	if((frame=setup_frame_common(sig,ka,set,regs,sizeof(rt_sigframe),
-		    (S390_SYSCALL_OPCODE|__NR_rt_sigreturn)))==0)
+	int err = 0;
+	rt_sigframe *frame = get_sigframe(ka, regs, sizeof(rt_sigframe));
+	if (!access_ok(VERIFY_WRITE, frame, sizeof(rt_sigframe)))
 		goto give_sigsegv;
-	
-	err = __copy_to_user(&frame->info, info, sizeof(*info));
+
+	if (copy_siginfo_to_user(&frame->info, info))
+		goto give_sigsegv;
 
 	/* Create the ucontext.  */
 	err |= __put_user(0, &frame->uc.uc_flags);
 	err |= __put_user(0, &frame->uc.uc_link);
-	err |= __put_user(current->sas_ss_sp, &frame->uc.uc_stack.ss_sp);
-	err |= __put_user(sas_ss_flags(orig_sp),
+	err |= __put_user((void *)current->sas_ss_sp, &frame->uc.uc_stack.ss_sp);
+	err |= __put_user(sas_ss_flags(regs->gprs[15]),
 			  &frame->uc.uc_stack.ss_flags);
 	err |= __put_user(current->sas_ss_size, &frame->uc.uc_stack.ss_size);
-	regs->gprs[3] = (u32)&frame->info;
-	regs->gprs[4] = (u32)&frame->uc;
-
+	err |= save_sigregs(regs, &frame->uc.uc_mcontext);
+	err |= __copy_to_user(&frame->uc.uc_sigmask, set, sizeof(*set));
 	if (err)
 		goto give_sigsegv;
 
-#if DEBUG_SIG
-	printk("SIG deliver (%s:%d): sp=%p pc=%p ra=%p\n",
-		current->comm, current->pid, frame, regs->eip, frame->pretcode);
-#endif
+	/* Set up to return from userspace.  If provided, use a stub
+	   already in userspace.  */
+	if (ka->sa.sa_flags & SA_RESTORER) {
+                regs->gprs[14] = (unsigned long)
+			ka->sa.sa_restorer | PSW_ADDR_AMODE;
+	} else {
+                regs->gprs[14] = (unsigned long)
+			frame->retcode | PSW_ADDR_AMODE;
+		err |= __put_user(S390_SYSCALL_OPCODE | __NR_rt_sigreturn, 
+	                          (u16 *)(frame->retcode));
+	}
+
+	/* Set up backchain. */
+	if (__put_user(regs->gprs[15], (addr_t *) frame))
+		goto give_sigsegv;
+
+	/* Set up registers for signal handler */
+	regs->gprs[15] = (unsigned long) frame;
+	regs->psw.addr = (unsigned long) ka->sa.sa_handler | PSW_ADDR_AMODE;
+	regs->psw.mask = PSW_USER_BITS;
+
+	regs->gprs[2] = map_signal(sig);
+	regs->gprs[3] = (unsigned long) &frame->info;
+	regs->gprs[4] = (unsigned long) &frame->uc;
 	return;
 
 give_sigsegv:
@@ -377,13 +393,19 @@ give_sigsegv:
  */	
 
 static void
-handle_signal(unsigned long sig, struct k_sigaction *ka,
-	      siginfo_t *info, sigset_t *oldset, struct pt_regs * regs)
+handle_signal(unsigned long sig, siginfo_t *info, sigset_t *oldset,
+	struct pt_regs * regs)
 {
+	struct k_sigaction *ka = &current->sighand->action[sig-1];
+
 	/* Are we from a system call? */
-	if (regs->orig_gpr2 >= 0) {
+	if (regs->trap == __LC_SVC_OLD_PSW) {
 		/* If so, check system call restarting.. */
 		switch (regs->gprs[2]) {
+			case -ERESTART_RESTARTBLOCK:
+				current_thread_info()->restart_block.fn =
+					do_no_restart_syscall;
+				clear_thread_flag(TIF_RESTART_SVC);
 			case -ERESTARTNOHAND:
 				regs->gprs[2] = -EINTR;
 				break;
@@ -396,7 +418,7 @@ handle_signal(unsigned long sig, struct k_sigaction *ka,
 			/* fallthrough */
 			case -ERESTARTNOINTR:
 				regs->gprs[2] = regs->orig_gpr2;
-				regs->psw.addr -= 2;
+				regs->psw.addr -= regs->ilc;
 		}
 	}
 
@@ -410,11 +432,11 @@ handle_signal(unsigned long sig, struct k_sigaction *ka,
 		ka->sa.sa_handler = SIG_DFL;
 
 	if (!(ka->sa.sa_flags & SA_NODEFER)) {
-		spin_lock_irq(&current->sigmask_lock);
+		spin_lock_irq(&current->sighand->siglock);
 		sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
 		sigaddset(&current->blocked,sig);
-		recalc_sigpending(current);
-		spin_unlock_irq(&current->sigmask_lock);
+		recalc_sigpending();
+		spin_unlock_irq(&current->sighand->siglock);
 	}
 }
 
@@ -430,7 +452,7 @@ handle_signal(unsigned long sig, struct k_sigaction *ka,
 int do_signal(struct pt_regs *regs, sigset_t *oldset)
 {
 	siginfo_t info;
-	struct k_sigaction *ka;
+	int signr;
 
 	/*
 	 * We want the common case to go fast, which
@@ -443,112 +465,34 @@ int do_signal(struct pt_regs *regs, sigset_t *oldset)
 
 	if (!oldset)
 		oldset = &current->blocked;
+#ifdef CONFIG_S390_SUPPORT 
+	if (test_thread_flag(TIF_31BIT)) {
+		extern asmlinkage int do_signal32(struct pt_regs *regs,
+						  sigset_t *oldset); 
+		return do_signal32(regs, oldset);
+        }
+#endif 
 
-	for (;;) {
-		unsigned long signr;
-
-		spin_lock_irq(&current->sigmask_lock);
-		signr = dequeue_signal(&current->blocked, &info);
-		spin_unlock_irq(&current->sigmask_lock);
-
-		if (!signr)
-			break;
-
-		if ((current->flags & PF_PTRACED) && signr != SIGKILL) {
-			/* Let the debugger run.  */
-			current->exit_code = signr;
-			current->state = TASK_STOPPED;
-			notify_parent(current, SIGCHLD);
-			schedule();
-
-			/* We're back.  Did the debugger cancel the sig?  */
-			if (!(signr = current->exit_code))
-				continue;
-			current->exit_code = 0;
-
-			/* The debugger continued.  Ignore SIGSTOP.  */
-			if (signr == SIGSTOP)
-				continue;
-
-			/* Update the siginfo structure.  Is this good?  */
-			if (signr != info.si_signo) {
-				info.si_signo = signr;
-				info.si_errno = 0;
-				info.si_code = SI_USER;
-				info.si_pid = current->p_pptr->pid;
-				info.si_uid = current->p_pptr->uid;
-			}
-
-			/* If the (new) signal is now blocked, requeue it.  */
-			if (sigismember(&current->blocked, signr)) {
-				send_sig_info(signr, &info, current);
-				continue;
-			}
-		}
-
-		ka = &current->sig->action[signr-1];
-		if (ka->sa.sa_handler == SIG_IGN) {
-			if (signr != SIGCHLD)
-				continue;
-			/* Check for SIGCHLD: it's special.  */
-			while (sys_wait4(-1, NULL, WNOHANG, NULL) > 0)
-				/* nothing */;
-			continue;
-		}
-
-		if (ka->sa.sa_handler == SIG_DFL) {
-			int exit_code = signr;
-
-			/* Init gets no signals it doesn't want.  */
-			if (current->pid == 1)
-				continue;
-
-			switch (signr) {
-			case SIGCONT: case SIGCHLD: case SIGWINCH:
-				continue;
-
-			case SIGTSTP: case SIGTTIN: case SIGTTOU:
-				if (is_orphaned_pgrp(current->pgrp))
-					continue;
-				/* FALLTHRU */
-
-			case SIGSTOP:
-				current->state = TASK_STOPPED;
-				current->exit_code = signr;
-				if (!(current->p_pptr->sig->action[SIGCHLD-1].sa.sa_flags & SA_NOCLDSTOP))
-					notify_parent(current, SIGCHLD);
-				schedule();
-				continue;
-
-			case SIGQUIT: case SIGILL: case SIGTRAP:
-			case SIGABRT: case SIGFPE: case SIGSEGV:
-                                if (do_coredump(signr, regs))
-                                        exit_code |= 0x80;
-                                /* FALLTHRU */
-
-			default:
-				lock_kernel();
-				sigaddset(&current->pending.signal, signr);
-				recalc_sigpending(current);
-				current->flags |= PF_SIGNALED;
-				do_exit(exit_code);
-				/* NOTREACHED */
-			}
-		}
-
+	signr = get_signal_to_deliver(&info, regs, NULL);
+	if (signr > 0) {
 		/* Whee!  Actually deliver the signal.  */
-		handle_signal(signr, ka, &info, oldset, regs);
+		handle_signal(signr, &info, oldset, regs);
 		return 1;
 	}
 
 	/* Did we come from a system call? */
-	if ( regs->trap == 0x20 /* System Call! */ ) {
+	if ( regs->trap == __LC_SVC_OLD_PSW /* System Call! */ ) {
 		/* Restart the system call - no handlers present */
 		if (regs->gprs[2] == -ERESTARTNOHAND ||
 		    regs->gprs[2] == -ERESTARTSYS ||
 		    regs->gprs[2] == -ERESTARTNOINTR) {
 			regs->gprs[2] = regs->orig_gpr2;
-			regs->psw.addr -= 2;
+			regs->psw.addr -= regs->ilc;
+		}
+		/* Restart the system call with a new system call number */
+		if (regs->gprs[2] == -ERESTART_RESTARTBLOCK) {
+			regs->gprs[2] = __NR_restart_syscall;
+			set_thread_flag(TIF_RESTART_SVC);
 		}
 	}
 	return 0;

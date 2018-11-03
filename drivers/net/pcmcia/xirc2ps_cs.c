@@ -5,6 +5,11 @@
  * This driver supports various Xircom CreditCard Ethernet adapters
  * including the CE2, CE IIps, RE-10, CEM28, CEM33, CE33, CEM56,
  * CE3-100, CE3B, RE-100, REM10BT, and REM56G-100.
+ *
+ * 2000-09-24 <psheer@icon.co.za> The Xircom CE3B-100 may not
+ * autodetect the media properly. In this case use the
+ * if_port=1 (for 10BaseT) or if_port=4 (for 100BaseT) options
+ * to force the media type.
  * 
  * Written originally by Werner Koch based on David Hinds' skeleton of the
  * PCMCIA driver.
@@ -61,18 +66,14 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
 #include <linux/in.h>
 #include <linux/delay.h>
-#include <asm/io.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-
+#include <linux/ethtool.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
@@ -85,6 +86,11 @@
 #include <pcmcia/cistpl.h>
 #include <pcmcia/cisreg.h>
 #include <pcmcia/ciscode.h>
+
+#include <asm/io.h>
+#include <asm/system.h>
+#include <asm/bitops.h>
+#include <asm/uaccess.h>
 
 #ifndef MANFID_COMPAQ
   #define MANFID_COMPAQ 	   0x0138
@@ -125,7 +131,7 @@ enum xirc_esr {
 enum xirc_isr {
     TxBufOvr = 0x01,	/* TX Buffer Overflow */
     PktTxed  = 0x02,	/* Packet Transmitted */
-    MACIntr  = 0x04,	/* MAC Interrupt occured */
+    MACIntr  = 0x04,	/* MAC Interrupt occurred */
     TxResGrant = 0x08,	/* Tx Reservation Granted */
     RxFullPkt = 0x20,	/* Rx Full Packet */
     RxPktRej  = 0x40,	/* Rx Packet Rejected */
@@ -219,9 +225,7 @@ MODULE_PARM(pc_debug, "i");
 #else
 #define DEBUG(n, args...)
 #endif
-static char *version =
-"xirc2ps_cs.c 1.31 1998/12/09 19:32:55 (dd9jn+kvh)";
-	    /* !--- CVS revision */
+
 #define KDBG_XIRC KERN_DEBUG   "xirc2ps_cs: "
 #define KERR_XIRC KERN_ERR     "xirc2ps_cs: "
 #define KWRN_XIRC KERN_WARNING "xirc2ps_cs: "
@@ -246,7 +250,10 @@ static char *version =
 #define XIR_CBE     14	/* (prodid 1) cardbus ethernet: not supported */
 /*====================================================================*/
 
-/* Parameters that can be set with 'insmod' */
+/* Module parameters */
+
+MODULE_DESCRIPTION("Xircom PCMCIA ethernet driver");
+MODULE_LICENSE("Dual MPL/GPL");
 
 #define INT_MODULE_PARM(n, v) static int n = v; MODULE_PARM(n, "i")
 
@@ -288,7 +295,7 @@ static void mii_wr(ioaddr_t ioaddr, u_char phyaddr, u_char phyreg,
 
 static int has_ce2_string(dev_link_t * link);
 static void xirc2ps_config(dev_link_t * link);
-static void xirc2ps_release(u_long arg);
+static void xirc2ps_release(dev_link_t * link);
 static int xirc2ps_event(event_t event, int priority,
 			 event_callback_args_t * args);
 
@@ -308,7 +315,7 @@ static void xirc2ps_detach(dev_link_t *);
  * less on other parts of the kernel.
  */
 
-static void xirc2ps_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t xirc2ps_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 
 /*
  * The dev_info variable is the "key" that is used to match up this
@@ -328,7 +335,7 @@ static dev_info_t dev_info = "xirc2ps_cs";
  * device numbers are used to derive the corresponding array index.
  */
 
-static dev_link_t *dev_list = NULL;
+static dev_link_t *dev_list;
 
 /****************
  * A dev_link_t structure has fields for most things that are needed
@@ -349,7 +356,6 @@ static dev_link_t *dev_list = NULL;
 
 typedef struct local_info_t {
     dev_link_t link;
-    struct net_device dev;
     dev_node_t node;
     struct net_device_stats stats;
     int card_type;
@@ -376,6 +382,7 @@ static int set_card_type(dev_link_t *link, const void *s);
 static int do_config(struct net_device *dev, struct ifmap *map);
 static int do_open(struct net_device *dev);
 static int do_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
+static struct ethtool_ops netdev_ethtool_ops;
 static void hardreset(struct net_device *dev);
 static void do_reset(struct net_device *dev, int full);
 static int init_mii(struct net_device *dev);
@@ -383,24 +390,6 @@ static void do_powerdown(struct net_device *dev);
 static int do_stop(struct net_device *dev);
 
 /*=============== Helper functions =========================*/
-static void
-flush_stale_links(void)
-{
-    dev_link_t *link, *next;
-    for (link = dev_list; link; link = next) {
-	next = link->next;
-	if (link->state & DEV_STALE_LINK)
-	    xirc2ps_detach(link);
-    }
-}
-
-static void
-cs_error(client_handle_t handle, int func, int ret)
-{
-    error_info_t err = { func, ret };
-    CardServices(ReportError, handle, &err);
-}
-
 static int
 get_tuple_data(int fn, client_handle_t handle, tuple_t *tuple)
 {
@@ -430,22 +419,10 @@ get_tuple(int fn, client_handle_t handle, tuple_t *tuple, cisparse_t *parse)
 #define PutByte(reg,value) outb((value), ioaddr+(reg))
 #define PutWord(reg,value) outw((value), ioaddr+(reg))
 
-static void
-busy_loop(u_long len)
-{
-    if (in_interrupt()) {
-	u_long timeout = jiffies + len;
-	u_long flags;
-	save_flags(flags);
-	sti();
-	while (timeout >= jiffies)
-	    ;
-	restore_flags(flags);
-    } else {
-	__set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout(len);
-    }
-}
+#define Wait(n) do { \
+	set_current_state(TASK_UNINTERRUPTIBLE); \
+	schedule_timeout(n); \
+} while (0)
 
 /*====== Functions used for debugging =================================*/
 #if defined(PCMCIA_DEBUG) && 0 /* reading regs may change system status */
@@ -614,17 +591,14 @@ xirc2ps_attach(void)
     int err;
 
     DEBUG(0, "attach()\n");
-    flush_stale_links();
 
     /* Allocate the device structure */
-    local = kmalloc(sizeof(*local), GFP_KERNEL);
-    if (!local) return NULL;
-    memset(local, 0, sizeof(*local));
-    link = &local->link; dev = &local->dev;
-    link->priv = dev->priv = local;
-
-    link->release.function = &xirc2ps_release;
-    link->release.data = (u_long) link;
+    dev = alloc_etherdev(sizeof(local_info_t));
+    if (!dev)
+	    return NULL;
+    local = dev->priv;
+    link = &local->link;
+    link->priv = dev;
 
     /* General socket configuration */
     link->conf.Attributes = CONF_ENABLE_IRQ;
@@ -636,16 +610,19 @@ xirc2ps_attach(void)
     link->irq.Instance = dev;
 
     /* Fill in card specific entries */
+    SET_MODULE_OWNER(dev);
     dev->hard_start_xmit = &do_start_xmit;
     dev->set_config = &do_config;
     dev->get_stats = &do_get_stats;
     dev->do_ioctl = &do_ioctl;
+    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
     dev->set_multicast_list = &set_multicast_list;
-    ether_setup(dev);
     dev->open = &do_open;
     dev->stop = &do_stop;
+#ifdef HAVE_TX_TIMEOUT
     dev->tx_timeout = do_tx_timeout;
     dev->watchdog_timeo = TX_TIMEOUT;
+#endif
 
     /* Register with Card Services */
     link->next = dev_list;
@@ -678,7 +655,7 @@ xirc2ps_attach(void)
 static void
 xirc2ps_detach(dev_link_t * link)
 {
-    local_info_t *local = link->priv;
+    struct net_device *dev = link->priv;
     dev_link_t **linkp;
 
     DEBUG(0, "detach(0x%p)\n", link);
@@ -698,13 +675,8 @@ xirc2ps_detach(dev_link_t * link)
      * the release() function is called, that will trigger a proper
      * detach().
      */
-    del_timer(&link->release);
-    if (link->state & DEV_CONFIG) {
-	DEBUG(0, "detach postponed, '%s' still locked\n",
-	      link->dev->dev_name);
-	link->state |= DEV_STALE_LINK;
-	return;
-    }
+    if (link->state & DEV_CONFIG)
+	xirc2ps_release(link);
 
     /* Break the link with Card Services */
     if (link->handle)
@@ -712,9 +684,11 @@ xirc2ps_detach(dev_link_t * link)
 
     /* Unlink device structure, free it */
     *linkp = link->next;
-    if (link->dev)
-	unregister_netdev(&local->dev);
-    kfree(local);
+    if (link->dev) {
+	unregister_netdev(dev);
+	free_netdev(dev);
+    } else
+	kfree(dev);
 
 } /* xirc2ps_detach */
 
@@ -739,7 +713,8 @@ xirc2ps_detach(dev_link_t * link)
 static int
 set_card_type(dev_link_t *link, const void *s)
 {
-    local_info_t *local = link->priv;
+    struct net_device *dev = link->priv;
+    local_info_t *local = dev->priv;
   #ifdef PCMCIA_DEBUG
     unsigned cisrev = ((const unsigned char *)s)[2];
   #endif
@@ -833,8 +808,8 @@ static void
 xirc2ps_config(dev_link_t * link)
 {
     client_handle_t handle = link->handle;
-    local_info_t *local = link->priv;
-    struct net_device *dev = &local->dev;
+    struct net_device *dev = link->priv;
+    local_info_t *local = dev->priv;
     tuple_t tuple;
     cisparse_t parse;
     ioaddr_t ioaddr;
@@ -1171,7 +1146,7 @@ xirc2ps_config(dev_link_t * link)
 
   config_error:
     link->state &= ~DEV_CONFIG_PENDING;
-    xirc2ps_release((u_long)link);
+    xirc2ps_release(link);
     return;
 
   cis_error:
@@ -1186,26 +1161,13 @@ xirc2ps_config(dev_link_t * link)
  * still open, this will be postponed until it is closed.
  */
 static void
-xirc2ps_release(u_long arg)
+xirc2ps_release(dev_link_t *link)
 {
-    dev_link_t *link = (dev_link_t *) arg;
-    local_info_t *local = link->priv;
-    struct net_device *dev = &local->dev;
 
     DEBUG(0, "release(0x%p)\n", link);
 
-    /*
-     * If the device is currently in use, we won't release until it
-     * is actually closed.
-     */
-    if (link->open) {
-	DEBUG(0, "release postponed, '%s' "
-	      "still open\n", link->dev->dev_name);
-	link->state |= DEV_STALE_CONFIG;
-	return;
-    }
-
     if (link->win) {
+	struct net_device *dev = link->priv;
 	local_info_t *local = dev->priv;
 	if (local->dingo)
 	    iounmap(local->dingo_ccr - 0x0800);
@@ -1237,8 +1199,7 @@ xirc2ps_event(event_t event, int priority,
 	      event_callback_args_t * args)
 {
     dev_link_t *link = args->client_data;
-    local_info_t *lp = link->priv;
-    struct net_device *dev = &lp->dev;
+    struct net_device *dev = link->priv;
 
     DEBUG(0, "event(%d)\n", (int)event);
 
@@ -1250,7 +1211,7 @@ xirc2ps_event(event_t event, int priority,
 	link->state &= ~DEV_PRESENT;
 	if (link->state & DEV_CONFIG) {
 	    netif_device_detach(dev);
-	    mod_timer(&link->release, jiffies + HZ/20);
+	    xirc2ps_release(link);
 	}
 	break;
     case CS_EVENT_CARD_INSERTION:
@@ -1290,7 +1251,7 @@ xirc2ps_event(event_t event, int priority,
 /****************
  * This is the Interrupt service route.
  */
-static void
+static irqreturn_t
 xirc2ps_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
     struct net_device *dev = (struct net_device *)dev_id;
@@ -1306,7 +1267,7 @@ xirc2ps_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 				  */
 
     if (!netif_device_present(dev))
-	return;
+	return IRQ_HANDLED;
 
     ioaddr = dev->base_addr;
     if (lp->mohawk) { /* must disable the interrupt */
@@ -1348,7 +1309,6 @@ xirc2ps_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	     * packets */
 	    lp->stats.rx_dropped++;
 	    DEBUG(2, "%s: RX drop, too much done\n", dev->name);
-	    PutWord(XIRCREG0_DO, 0x8000); /* issue cmd: skip_rx_packet */
 	} else if (rsr & PktRxOk) {
 	    struct sk_buff *skb;
 
@@ -1418,13 +1378,13 @@ xirc2ps_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		skb->protocol = eth_type_trans(skb, dev);
 		skb->dev = dev;
 		netif_rx(skb);
+		dev->last_rx = jiffies;
 		lp->stats.rx_packets++;
 		lp->stats.rx_bytes += pktlen;
 		if (!(rsr & PhyPkt))
 		    lp->stats.multicast++;
 	    }
-	    PutWord(XIRCREG0_DO, 0x8000); /* issue cmd: skip_rx_packet */
-	} else {
+	} else { /* bad packet */
 	    DEBUG(5, "rsr=%#02x\n", rsr);
 	}
 	if (rsr & PktTooLong) {
@@ -1439,6 +1399,9 @@ xirc2ps_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	    lp->stats.rx_fifo_errors++; /* okay ? */
 	    DEBUG(3, "%s: Alignment error\n", dev->name);
 	}
+
+	/* clear the received/dropped/error packet */
+	PutWord(XIRCREG0_DO, 0x8000); /* issue cmd: skip_rx_packet */
 
 	/* get the new ethernet status */
 	eth_status = GetByte(XIRCREG_ESR);
@@ -1506,6 +1469,7 @@ xirc2ps_interrupt(int irq, void *dev_id, struct pt_regs *regs)
      * force an interrupt with this command:
      *	  PutByte(XIRCREG_CR, EnableIntr|ForceIntr);
      */
+    return IRQ_HANDLED;
 } /* xirc2ps_interrupt */
 
 /*====================================================================*/
@@ -1519,7 +1483,7 @@ do_tx_timeout(struct net_device *dev)
     /* reset the card */
     do_reset(dev,1);
     dev->trans_start = jiffies;
-    netif_start_queue(dev);
+    netif_wake_queue(dev);
 }
 
 static int
@@ -1534,7 +1498,6 @@ do_start_xmit(struct sk_buff *skb, struct net_device *dev)
     DEBUG(1, "do_start_xmit(skb=%p, dev=%p) len=%u\n",
 	  skb, dev, pktlen);
 
-    netif_stop_queue(dev);
 
     /* adjust the packet length to min. required
      * and hope that the buffer is large enough
@@ -1544,8 +1507,14 @@ do_start_xmit(struct sk_buff *skb, struct net_device *dev)
      * pad this in his buffer with random bytes
      */
     if (pktlen < ETH_ZLEN)
+    {
+        skb = skb_padto(skb, ETH_ZLEN);
+        if (skb == NULL)
+        	return 0;
 	pktlen = ETH_ZLEN;
+    }
 
+    netif_stop_queue(dev);
     SelectPage(0);
     PutWord(XIRCREG0_TRS, (u_short)pktlen+2);
     freespace = GetWord(XIRCREG0_TSO);
@@ -1695,13 +1664,22 @@ do_open(struct net_device *dev)
 
     /* okay */
     link->open++;
-    MOD_INC_USE_COUNT;
 
     netif_start_queue(dev);
     do_reset(dev,1);
 
     return 0;
 }
+
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, "xirc2ps_cs");
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+};
 
 static int
 do_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
@@ -1718,13 +1696,13 @@ do_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	return -EOPNOTSUPP;
 
     switch(cmd) {
-      case SIOCDEVPRIVATE:	/* Get the address of the PHY in use. */
+      case SIOCGMIIPHY:		/* Get the address of the PHY in use. */
 	data[0] = 0;		/* we have only this address */
 	/* fall trough */
-      case SIOCDEVPRIVATE+1:	/* Read the specified MII register. */
+      case SIOCGMIIREG:		/* Read the specified MII register. */
 	data[3] = mii_rd(ioaddr, data[0] & 0x1f, data[1] & 0x1f);
 	break;
-      case SIOCDEVPRIVATE+2:	/* Write the specified MII register */
+      case SIOCSMIIREG:		/* Write the specified MII register */
 	if (!capable(CAP_NET_ADMIN))
 	    return -EPERM;
 	mii_wr(ioaddr, data[0] & 0x1f, data[1] & 0x1f, data[2], 16);
@@ -1744,12 +1722,12 @@ hardreset(struct net_device *dev)
     SelectPage(4);
     udelay(1);
     PutByte(XIRCREG4_GPR1, 0);	     /* clear bit 0: power down */
-    busy_loop(HZ/25);		     /* wait 40 msec */
+    Wait(HZ/25);		     /* wait 40 msec */
     if (local->mohawk)
 	PutByte(XIRCREG4_GPR1, 1);	 /* set bit 0: power up */
     else
 	PutByte(XIRCREG4_GPR1, 1 | 4);	 /* set bit 0: power up, bit 2: AIC */
-    busy_loop(HZ/50);		     /* wait 20 msec */
+    Wait(HZ/50);		     /* wait 20 msec */
 }
 
 static void
@@ -1763,9 +1741,9 @@ do_reset(struct net_device *dev, int full)
 
     hardreset(dev);
     PutByte(XIRCREG_CR, SoftReset); /* set */
-    busy_loop(HZ/50);		     /* wait 20 msec */
+    Wait(HZ/50);		     /* wait 20 msec */
     PutByte(XIRCREG_CR, 0);	     /* clear */
-    busy_loop(HZ/25);		     /* wait 40 msec */
+    Wait(HZ/25);		     /* wait 40 msec */
     if (local->mohawk) {
 	SelectPage(4);
 	/* set pin GP1 and GP2 to output  (0x0c)
@@ -1776,7 +1754,7 @@ do_reset(struct net_device *dev, int full)
     }
 
     /* give the circuits some time to power up */
-    busy_loop(HZ/2);		/* about 500ms */
+    Wait(HZ/2);		/* about 500ms */
 
     local->last_ptr_value = 0;
     local->silicon = local->mohawk ? (GetByte(XIRCREG4_BOV) & 0x70) >> 4
@@ -1795,7 +1773,7 @@ do_reset(struct net_device *dev, int full)
 	SelectPage(0x42);
 	PutByte(XIRCREG42_SWC1, 0x80);
     }
-    busy_loop(HZ/25);		     /* wait 40 msec to let it complete */
+    Wait(HZ/25);		     /* wait 40 msec to let it complete */
 
   #ifdef PCMCIA_DEBUG
     if (pc_debug) {
@@ -1854,7 +1832,7 @@ do_reset(struct net_device *dev, int full)
 	    printk(KERN_INFO "%s: MII selected\n", dev->name);
 	    SelectPage(2);
 	    PutByte(XIRCREG2_MSR, GetByte(XIRCREG2_MSR) | 0x08);
-	    busy_loop(HZ/50);
+	    Wait(HZ/50);
 	} else {
 	    printk(KERN_INFO "%s: MII detected; using 10mbs\n",
 		   dev->name);
@@ -1863,7 +1841,7 @@ do_reset(struct net_device *dev, int full)
 		PutByte(XIRCREG42_SWC1, 0xC0);
 	    else  /* enable 10BaseT */
 		PutByte(XIRCREG42_SWC1, 0x80);
-	    busy_loop(HZ/25);	/* wait 40 msec to let it complete */
+	    Wait(HZ/25);	/* wait 40 msec to let it complete */
 	}
 	if (full_duplex)
 	    PutByte(XIRCREG1_ECR, GetByte(XIRCREG1_ECR | FullDuplex));
@@ -1921,6 +1899,12 @@ init_mii(struct net_device *dev)
     unsigned control, status, linkpartner;
     int i;
 
+    if (if_port == 4 || if_port == 1) { /* force 100BaseT or 10BaseT */
+	dev->if_port = if_port;
+	local->probe_port = 0;
+	return 1;
+    }
+
     status = mii_rd(ioaddr,  0, 1);
     if ((status & 0xff00) != 0x7800)
 	return 0; /* No MII */
@@ -1950,7 +1934,7 @@ init_mii(struct net_device *dev)
 	 * Fixme: Better to use a timer here!
 	 */
 	for (i=0; i < 35; i++) {
-	    busy_loop(HZ/10);	 /* wait 100 msec */
+	    Wait(HZ/10);	 /* wait 100 msec */
 	    status = mii_rd(ioaddr,  0, 1);
 	    if ((status & 0x0020) && (status & 0x0004))
 		break;
@@ -2016,45 +2000,60 @@ do_stop(struct net_device *dev)
     SelectPage(0);
 
     link->open--;
-    if (link->state & DEV_STALE_CONFIG)
-	mod_timer(&link->release, jiffies + HZ/20);
-
-    MOD_DEC_USE_COUNT;
-
     return 0;
 }
+
+static struct pcmcia_driver xirc2ps_cs_driver = {
+	.owner		= THIS_MODULE,
+	.drv		= {
+		.name	= "xirc2ps_cs",
+	},
+	.attach		= xirc2ps_attach,
+	.detach		= xirc2ps_detach,
+};
 
 static int __init
 init_xirc2ps_cs(void)
 {
-    servinfo_t serv;
-
-    printk(KERN_INFO "%s\n", version);
-    if (lockup_hack)
-	printk(KINF_XIRC "lockup hack is enabled\n");
-    CardServices(GetCardServicesInfo, &serv);
-    if (serv.Revision != CS_RELEASE_CODE) {
-	printk(KNOT_XIRC "Card Services release does not match!\n");
-	return -1;
-    }
-    DEBUG(0, "pc_debug=%d\n", pc_debug);
-    register_pccard_driver(&dev_info, &xirc2ps_attach, &xirc2ps_detach);
-    return 0;
+	return pcmcia_register_driver(&xirc2ps_cs_driver);
 }
 
 static void __exit
 exit_xirc2ps_cs(void)
 {
-    DEBUG(0, "unloading\n");
-    unregister_pccard_driver(&dev_info);
-    while (dev_list) {
-	if (dev_list->state & DEV_CONFIG)
-	    xirc2ps_release((u_long)dev_list);
-	if (dev_list)	/* xirc2ps_release() might already have detached... */
-	    xirc2ps_detach(dev_list);
-    }
+	pcmcia_unregister_driver(&xirc2ps_cs_driver);
+
+	while (dev_list)
+		xirc2ps_detach(dev_list);
 }
 
 module_init(init_xirc2ps_cs);
 module_exit(exit_xirc2ps_cs);
 
+#ifndef MODULE
+static int __init setup_xirc2ps_cs(char *str)
+{
+	/* irq, irq_mask, if_port, full_duplex, do_sound, lockup_hack
+	 * [,irq2 [,irq3 [,irq4]]]
+	 */
+	int ints[10] = { -1 };
+
+	str = get_options(str, 9, ints);
+
+#define MAYBE_SET(X,Y) if (ints[0] >= Y && ints[Y] != -1) { X = ints[Y]; }
+	MAYBE_SET(irq_list[0], 1);
+	MAYBE_SET(irq_mask, 2);
+	MAYBE_SET(if_port, 3);
+	MAYBE_SET(full_duplex, 4);
+	MAYBE_SET(do_sound, 5);
+	MAYBE_SET(lockup_hack, 6);
+	MAYBE_SET(irq_list[1], 7);
+	MAYBE_SET(irq_list[2], 8);
+	MAYBE_SET(irq_list[3], 9);
+#undef  MAYBE_SET
+
+	return 0;
+}
+
+__setup("xirc2ps_cs=", setup_xirc2ps_cs);
+#endif

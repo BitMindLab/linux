@@ -1,10 +1,12 @@
-/* $Id: isar.h,v 1.9 2000/06/26 08:59:13 keil Exp $
+/* $Id: isar.h,v 1.9.6.2 2001/09/23 22:24:49 kai Exp $
  *
- * isar.h   ISAR (Siemens PSB 7110) specific defines
+ * ISAR (Siemens PSB 7110) specific defines
  *
- * Author Karsten Keil (keil@isdn4linux.de)
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
  
@@ -205,8 +207,8 @@
 #define STFAX_ESCAPE	5
 #define STFAX_SILDET	6
 
-extern int ISARVersion(struct IsdnCardState *cs, char *s);
 extern void isar_int_main(struct IsdnCardState *cs);
 extern void initisar(struct IsdnCardState *cs);
 extern void isar_fill_fifo(struct BCState *bcs);
 extern int isar_auxcmd(struct IsdnCardState *cs, isdn_ctrl *ic);
+extern int isar_setup(struct IsdnCardState *cs, struct bc_hw_ops *isar_ops);

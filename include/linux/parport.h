@@ -11,8 +11,8 @@
 
 /* Start off with user-visible constants */
 
-/* Maximum of 8 ports per machine */
-#define PARPORT_MAX  8 
+/* Maximum of 16 ports per machine */
+#define PARPORT_MAX  16
 
 /* Magic numbers */
 #define PARPORT_IRQ_NONE  -1
@@ -22,6 +22,7 @@
 #define PARPORT_DMA_NOFIFO -3
 #define PARPORT_DISABLE   -2
 #define PARPORT_IRQ_PROBEONLY -3
+#define PARPORT_IOHI_AUTO -1
 
 #define PARPORT_CONTROL_STROBE    0x1
 #define PARPORT_CONTROL_AUTOFD    0x2
@@ -90,17 +91,19 @@ typedef enum {
 
 /* Flags for block transfer operations. */
 #define PARPORT_EPP_FAST		(1<<0) /* Unreliable counts. */
+#define PARPORT_W91284PIC		(1<<1) /* have a Warp9 w91284pic in the device */
 
 /* The rest is for the kernel only */
 #ifdef __KERNEL__
 
-#include <linux/wait.h>
+#include <linux/config.h>
+#include <linux/jiffies.h>
+#include <linux/proc_fs.h>
 #include <linux/spinlock.h>
+#include <linux/wait.h>
 #include <asm/system.h>
 #include <asm/ptrace.h>
 #include <asm/semaphore.h>
-#include <linux/proc_fs.h>
-#include <linux/config.h>
 
 #define PARPORT_NEED_GENERIC_OPS
 
@@ -163,9 +166,6 @@ struct parport_operations {
 	void (*save_state)(struct parport *, struct parport_state *);
 	void (*restore_state)(struct parport *, struct parport_state *);
 
-	void (*inc_use_count)(void);
-	void (*dec_use_count)(void);
-
 	/* Block read/write */
 	size_t (*epp_write_data) (struct parport *port, const void *buf,
 				  size_t len, int flags);
@@ -189,6 +189,7 @@ struct parport_operations {
 				    size_t len, int flags);
 	size_t (*byte_read_data) (struct parport *port, void *buf,
 				  size_t len, int flags);
+	struct module *owner;
 };
 
 struct parport_device_info {
@@ -229,7 +230,7 @@ struct pardevice {
 	unsigned long int time;
 	unsigned long int timeslice;
 	volatile long int timeout;
-	unsigned int waiting;
+	unsigned long waiting;		 /* long req'd for set_bit --RR */
 	struct pardevice *waitprev;
 	struct pardevice *waitnext;
 	void * sysctl_table;
@@ -249,7 +250,8 @@ enum ieee1284_phase {
 	IEEE1284_PH_REV_DATA,
 	IEEE1284_PH_ECP_SETUP,
 	IEEE1284_PH_ECP_FWD_TO_REV,
-	IEEE1284_PH_ECP_REV_TO_FWD
+	IEEE1284_PH_ECP_REV_TO_FWD,
+	IEEE1284_PH_ECP_DIR_UNKNOWN,
 };
 struct ieee1284_info {
 	int mode;
@@ -413,7 +415,7 @@ extern void parport_release(struct pardevice *dev);
  * timeslice is half a second, but it can be adjusted via the /proc
  * interface.
  **/
-extern __inline__ int parport_yield(struct pardevice *dev)
+static __inline__ int parport_yield(struct pardevice *dev)
 {
 	unsigned long int timeslip = (jiffies - dev->time);
 	if ((dev->port->waithead == NULL) || (timeslip < dev->timeslice))
@@ -431,7 +433,7 @@ extern __inline__ int parport_yield(struct pardevice *dev)
  * parport_claim_or_block(), and the return value is the same as for
  * parport_claim_or_block().
  **/
-extern __inline__ int parport_yield_blocking(struct pardevice *dev)
+static __inline__ int parport_yield_blocking(struct pardevice *dev)
 {
 	unsigned long int timeslip = (jiffies - dev->time);
 	if ((dev->port->waithead == NULL) || (timeslip < dev->timeslice))
@@ -455,7 +457,10 @@ extern void parport_ieee1284_interrupt (int, void *, struct pt_regs *);
 extern int parport_negotiate (struct parport *, int mode);
 extern ssize_t parport_write (struct parport *, const void *buf, size_t len);
 extern ssize_t parport_read (struct parport *, void *buf, size_t len);
+
+#define PARPORT_INACTIVITY_O_NONBLOCK 1
 extern long parport_set_timeout (struct pardevice *, long inactivity);
+
 extern int parport_wait_event (struct parport *, long timeout);
 extern int parport_wait_peripheral (struct parport *port,
 				    unsigned char mask,
@@ -516,7 +521,7 @@ extern int parport_find_device (const char *mfg, const char *mdl, int from);
 extern int parport_find_class (parport_device_class cls, int from);
 
 /* Lowlevel drivers _can_ call this support function to handle irqs.  */
-extern __inline__ void parport_generic_irq(int irq, struct parport *port,
+static __inline__ void parport_generic_irq(int irq, struct parport *port,
 					   struct pt_regs *regs)
 {
 	parport_ieee1284_interrupt (irq, port, regs);
@@ -533,9 +538,6 @@ extern int parport_device_proc_register(struct pardevice *device);
 extern int parport_device_proc_unregister(struct pardevice *device);
 extern int parport_default_proc_register(void);
 extern int parport_default_proc_unregister(void);
-
-extern void dec_parport_count(void);
-extern void inc_parport_count(void);
 
 /* If PC hardware is the only type supported, we can optimise a bit.  */
 #if (defined(CONFIG_PARPORT_PC) || defined(CONFIG_PARPORT_PC_MODULE)) && !(defined(CONFIG_PARPORT_ARC) || defined(CONFIG_PARPORT_ARC_MODULE)) && !(defined(CONFIG_PARPORT_AMIGA) || defined(CONFIG_PARPORT_AMIGA_MODULE)) && !(defined(CONFIG_PARPORT_MFC3) || defined(CONFIG_PARPORT_MFC3_MODULE)) && !(defined(CONFIG_PARPORT_ATARI) || defined(CONFIG_PARPORT_ATARI_MODULE)) && !(defined(CONFIG_USB_USS720) || defined(CONFIG_USB_USS720_MODULE)) && !(defined(CONFIG_PARPORT_SUNBPP) || defined(CONFIG_PARPORT_SUNBPP_MODULE)) && !defined(CONFIG_PARPORT_OTHER)

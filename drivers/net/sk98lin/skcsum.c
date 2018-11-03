@@ -2,16 +2,15 @@
  *
  * Name:	skcsum.c
  * Project:	GEnesis, PCI Gigabit Ethernet Adapter
- * Version:	$Revision: 1.7 $
- * Date:	$Date: 2000/06/29 13:17:05 $
+ * Version:	$Revision: 1.11 $
+ * Date:	$Date: 2003/03/11 14:05:55 $
  * Purpose:	Store/verify Internet checksum in send/receive packets.
  *
  ******************************************************************************/
 
 /******************************************************************************
  *
- *	(C)Copyright 1998-2000 SysKonnect,
- *	a business unit of Schneider & Koch & Co. Datensysteme GmbH.
+ *	(C)Copyright 1998-2003 SysKonnect GmbH.
  *
  *	This program is free software; you can redistribute it and/or modify
  *	it under the terms of the GNU General Public License as published by
@@ -27,6 +26,22 @@
  * History:
  *
  *	$Log: skcsum.c,v $
+ *	Revision 1.11  2003/03/11 14:05:55  rschmidt
+ *	Replaced memset() by macro SK_MEMSET()
+ *	Editorial changes
+ *	
+ *	Revision 1.10  2002/04/11 10:02:04  rwahl
+ *	Fix in SkCsGetSendInfo():
+ *	- function did not return ProtocolFlags in every case.
+ *	- pseudo header csum calculated wrong for big endian.
+ *	
+ *	Revision 1.9  2001/06/13 07:42:08  gklug
+ *	fix: NetNumber was wrong in CLEAR_STAT event
+ *	add: check for good NetNumber in Clear STAT
+ *	
+ *	Revision 1.8  2001/02/06 11:15:36  rassmann
+ *	Supporting two nets on dual-port adapters.
+ *	
  *	Revision 1.7  2000/06/29 13:17:05  rassmann
  *	Corrected reception of a packet with UDP checksum == 0 (which means there
  *	is no UDP checksum).
@@ -62,9 +77,8 @@
 #ifdef SK_USE_CSUM	/* Check if CSUM is to be used. */
 
 #ifndef lint
-static const char SysKonnectFileId[] = "@(#)"
-	"$Id: skcsum.c,v 1.7 2000/06/29 13:17:05 rassmann Exp $"
-	" (C) SysKonnect.";
+static const char SysKonnectFileId[] =
+	"@(#) $Id: skcsum.c,v 1.11 2003/03/11 14:05:55 rschmidt Exp $ (C) SysKonnect.";
 #endif	/* !lint */
 
 /******************************************************************************
@@ -96,8 +110,8 @@ static const char SysKonnectFileId[] = "@(#)"
  *
  *	"h/skdrv1st.h"
  *	"h/skcsum.h"
- *	 "h/sktypes.h"
- *	 "h/skqueue.h"
+ *	"h/sktypes.h"
+ *	"h/skqueue.h"
  *	"h/skdrv2nd.h"
  *
  ******************************************************************************/
@@ -162,7 +176,7 @@ static const char SysKonnectFileId[] = "@(#)"
  * little/big endian conversion on little endian machines only.
  */
 #ifdef SK_LITTLE_ENDIAN
-#define SKCS_HTON16(Val16)	(((unsigned) (Val16) >> 8) | (((Val16) & 0xFF) << 8))
+#define SKCS_HTON16(Val16)	(((unsigned) (Val16) >> 8) | (((Val16) & 0xff) << 8))
 #endif	/* SK_LITTLE_ENDIAN */
 #ifdef SK_BIG_ENDIAN
 #define SKCS_HTON16(Val16)	(Val16)
@@ -193,7 +207,7 @@ static const char SysKonnectFileId[] = "@(#)"
  *	zero.)
  *
  * Note:
- *	There is a bug in the ASIC whic may lead to wrong checksums.
+ *	There is a bug in the GENESIS ASIC which may lead to wrong checksums.
  *
  * Arguments:
  *	pAc - A pointer to the adapter context struct.
@@ -249,7 +263,8 @@ static const char SysKonnectFileId[] = "@(#)"
 void SkCsGetSendInfo(
 SK_AC				*pAc,			/* Adapter context struct. */
 void				*pIpHeader,		/* IP header. */
-SKCS_PACKET_INFO	*pPacketInfo)	/* Packet information struct. */
+SKCS_PACKET_INFO	*pPacketInfo,	/* Packet information struct. */
+int					NetNumber)		/* Net number */
 {
 	/* Internet Header Version found in IP header. */
 	unsigned InternetHeaderVersion;
@@ -291,7 +306,7 @@ SKCS_PACKET_INFO	*pPacketInfo)	/* Packet information struct. */
 			("Tx: Unknown Internet Header Version %u.\n",
 			InternetHeaderVersion));
 		pPacketInfo->ProtocolFlags = 0;
-		pAc->Csum.ProtoStats[SKCS_PROTO_STATS_IP].TxUnableCts++;
+		pAc->Csum.ProtoStats[NetNumber][SKCS_PROTO_STATS_IP].TxUnableCts++;
 		return;
 	}
 
@@ -312,13 +327,13 @@ SKCS_PACKET_INFO	*pPacketInfo)	/* Packet information struct. */
 		SK_DBG_MSG(pAc, SK_DBGMOD_CSUM, SK_DBGCAT_ERR | SK_DBGCAT_TX,
 			("Tx: Invalid IP Header Length %u.\n", IpHeaderLength));
 		pPacketInfo->ProtocolFlags = 0;
-		pAc->Csum.ProtoStats[SKCS_PROTO_STATS_IP].TxUnableCts++;
+		pAc->Csum.ProtoStats[NetNumber][SKCS_PROTO_STATS_IP].TxUnableCts++;
 		return;
 	}
 
 	/* This is an IPv4 frame with a header of valid length. */
 
-	pAc->Csum.ProtoStats[SKCS_PROTO_STATS_IP].TxOkCts++;
+	pAc->Csum.ProtoStats[NetNumber][SKCS_PROTO_STATS_IP].TxOkCts++;
 
 	/* Check if we should calculate the IP header checksum. */
 
@@ -347,14 +362,14 @@ SKCS_PACKET_INFO	*pPacketInfo)	/* Packet information struct. */
 		/* TCP/IP frame. */
 		ProtocolFlags &= SKCS_PROTO_TCP | SKCS_PROTO_IP;
 		NextLevelProtoStats =
-			&pAc->Csum.ProtoStats[SKCS_PROTO_STATS_TCP];
+			&pAc->Csum.ProtoStats[NetNumber][SKCS_PROTO_STATS_TCP];
 	}
 	else if ((ProtocolFlags & SKCS_PROTO_UDP) != 0 &&
 		NextLevelProtocol == SKCS_PROTO_ID_UDP) {
 		/* UDP/IP frame. */
 		ProtocolFlags &= SKCS_PROTO_UDP | SKCS_PROTO_IP;
 		NextLevelProtoStats =
-			&pAc->Csum.ProtoStats[SKCS_PROTO_STATS_UDP];
+			&pAc->Csum.ProtoStats[NetNumber][SKCS_PROTO_STATS_UDP];
 	}
 	else {
 		/*
@@ -408,9 +423,9 @@ SKCS_PACKET_INFO	*pPacketInfo)	/* Packet information struct. */
 			SKCS_OFS_IP_DESTINATION_ADDRESS + 0) +
 		(unsigned long) *(SK_U16 *) SKCS_IDX(pIpHeader,
 			SKCS_OFS_IP_DESTINATION_ADDRESS + 2) +
-		(unsigned long) (NextLevelProtocol << 8) +
+		(unsigned long) SKCS_HTON16(NextLevelProtocol) +
 		(unsigned long) SKCS_HTON16(IpDataLength);
-
+	
 	/* Add-in any carries. */
 
 	SKCS_OC_ADD(PseudoHeaderChecksum, PseudoHeaderChecksum, 0);
@@ -419,6 +434,7 @@ SKCS_PACKET_INFO	*pPacketInfo)	/* Packet information struct. */
 
 	SKCS_OC_ADD(pPacketInfo->PseudoHeaderChecksum, PseudoHeaderChecksum, 0);
 
+	pPacketInfo->ProtocolFlags = ProtocolFlags;
 	NextLevelProtoStats->TxOkCts++;	/* Success. */
 }	/* SkCsGetSendInfo */
 
@@ -475,7 +491,8 @@ SKCS_STATUS SkCsGetReceiveInfo(
 SK_AC		*pAc,		/* Adapter context struct. */
 void		*pIpHeader,	/* IP header. */
 unsigned	Checksum1,	/* Hardware checksum 1. */
-unsigned	Checksum2)	/* Hardware checksum 2. */
+unsigned	Checksum2,	/* Hardware checksum 2. */
+int			NetNumber)	/* Net number */
 {
 	/* Internet Header Version found in IP header. */
 	unsigned InternetHeaderVersion;
@@ -522,7 +539,7 @@ unsigned	Checksum2)	/* Hardware checksum 2. */
 		SK_DBG_MSG(pAc, SK_DBGMOD_CSUM, SK_DBGCAT_ERR | SK_DBGCAT_RX,
 			("Rx: Unknown Internet Header Version %u.\n",
 			InternetHeaderVersion));
-		pAc->Csum.ProtoStats[SKCS_PROTO_STATS_IP].RxUnableCts++;
+		pAc->Csum.ProtoStats[NetNumber][SKCS_PROTO_STATS_IP].RxUnableCts++;
 		return (SKCS_STATUS_UNKNOWN_IP_VERSION);
 	}
 
@@ -541,7 +558,7 @@ unsigned	Checksum2)	/* Hardware checksum 2. */
 	if (IpHeaderLength < 5*4) {
 		SK_DBG_MSG(pAc, SK_DBGMOD_CSUM, SK_DBGCAT_ERR | SK_DBGCAT_RX,
 			("Rx: Invalid IP Header Length %u.\n", IpHeaderLength));
-		pAc->Csum.ProtoStats[SKCS_PROTO_STATS_IP].RxErrCts++;
+		pAc->Csum.ProtoStats[NetNumber][SKCS_PROTO_STATS_IP].RxErrCts++;
 		return (SKCS_STATUS_IP_CSUM_ERROR);
 	}
 
@@ -589,8 +606,8 @@ unsigned	Checksum2)	/* Hardware checksum 2. */
 	NextLevelProtocol = *(SK_U8 *)
 		SKCS_IDX(pIpHeader, SKCS_OFS_IP_NEXT_LEVEL_PROTOCOL);
 
-	if (IpHeaderChecksum != 0xFFFF) {
-		pAc->Csum.ProtoStats[SKCS_PROTO_STATS_IP].RxErrCts++;
+	if (IpHeaderChecksum != 0xffff) {
+		pAc->Csum.ProtoStats[NetNumber][SKCS_PROTO_STATS_IP].RxErrCts++;
 		/* the NDIS tester wants to know the upper level protocol too */
 		if (NextLevelProtocol == SKCS_PROTO_ID_TCP) {
 			return(SKCS_STATUS_IP_CSUM_ERROR_TCP);
@@ -609,15 +626,17 @@ unsigned	Checksum2)	/* Hardware checksum 2. */
 	 * frame.
 	 */
 
-	if ((pAc->Csum.ReceiveFlags & SKCS_PROTO_TCP) != 0 &&
+	if ((pAc->Csum.ReceiveFlags[NetNumber] & SKCS_PROTO_TCP) != 0 &&
 		NextLevelProtocol == SKCS_PROTO_ID_TCP) {
 		/* TCP/IP frame. */
-		NextLevelProtoStats = &pAc->Csum.ProtoStats[SKCS_PROTO_STATS_TCP];
+		NextLevelProtoStats =
+			&pAc->Csum.ProtoStats[NetNumber][SKCS_PROTO_STATS_TCP];
 	}
-	else if ((pAc->Csum.ReceiveFlags & SKCS_PROTO_UDP) != 0 &&
+	else if ((pAc->Csum.ReceiveFlags[NetNumber] & SKCS_PROTO_UDP) != 0 &&
 		NextLevelProtocol == SKCS_PROTO_ID_UDP) {
 		/* UDP/IP frame. */
-		NextLevelProtoStats = &pAc->Csum.ProtoStats[SKCS_PROTO_STATS_UDP];
+		NextLevelProtoStats =
+			&pAc->Csum.ProtoStats[NetNumber][SKCS_PROTO_STATS_UDP];
 	}
 	else {
 		/*
@@ -705,7 +724,7 @@ unsigned	Checksum2)	/* Hardware checksum 2. */
 
 	/* Check if the TCP/UDP checksum is ok. */
 
-	if ((unsigned) NextLevelProtocolChecksum == 0xFFFF) {
+	if ((unsigned) NextLevelProtocolChecksum == 0xffff) {
 
 		/* TCP/UDP checksum ok. */
 
@@ -755,11 +774,12 @@ void SkCsSetReceiveFlags(
 SK_AC		*pAc,				/* Adapter context struct. */
 unsigned	ReceiveFlags,		/* New receive flags. */
 unsigned	*pChecksum1Offset,	/* Offset for hardware checksum 1. */
-unsigned	*pChecksum2Offset)	/* Offset for hardware checksum 2. */
+unsigned	*pChecksum2Offset,	/* Offset for hardware checksum 2. */
+int			NetNumber)
 {
 	/* Save the receive flags. */
 
-	pAc->Csum.ReceiveFlags = ReceiveFlags;
+	pAc->Csum.ReceiveFlags[NetNumber] = ReceiveFlags;
 
 	/* First checksum start offset is the IP header. */
 	*pChecksum1Offset = SKCS_MAC_HEADER_SIZE;
@@ -871,23 +891,28 @@ SK_U32		Event,	/* Event id. */
 SK_EVPARA	Param)	/* Event dependent parameter. */
 {
 	int ProtoIndex;
+	int	NetNumber;
 
 	switch (Event) {
 	/*
 	 * Clear protocol statistics.
 	 *
 	 * Param - Protocol index, or -1 for all protocols.
+	 *		 - Net number.
 	 */
 	case SK_CSUM_EVENT_CLEAR_PROTO_STATS:
 
-		ProtoIndex = (int) Param.Para32[0];
+		ProtoIndex = (int)Param.Para32[1];
+		NetNumber = (int)Param.Para32[0];
 		if (ProtoIndex < 0) {	/* Clear for all protocols. */
-			memset(&pAc->Csum.ProtoStats[0], 0,
-				sizeof(pAc->Csum.ProtoStats));
+			if (NetNumber >= 0) {
+				SK_MEMSET(&pAc->Csum.ProtoStats[NetNumber][0], 0,
+					sizeof(pAc->Csum.ProtoStats[NetNumber]));
+			}
 		}
 		else {					/* Clear for individual protocol. */
-			memset(&pAc->Csum.ProtoStats[ProtoIndex], 0,
-				sizeof(pAc->Csum.ProtoStats[ProtoIndex]));
+			SK_MEMSET(&pAc->Csum.ProtoStats[NetNumber][ProtoIndex], 0,
+				sizeof(pAc->Csum.ProtoStats[NetNumber][ProtoIndex]));
 		}
 		break;
 	default:

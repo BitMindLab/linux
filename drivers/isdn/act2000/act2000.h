@@ -1,35 +1,19 @@
-/* $Id: act2000.h,v 1.8 2000/11/12 16:32:06 kai Exp $
+/* $Id: act2000.h,v 1.8.6.3 2001/09/23 22:24:32 kai Exp $
  *
  * ISDN lowlevel-module for the IBM ISDN-S0 Active 2000.
  *
- * Copyright 1998 by Fritz Elfert (fritz@isdn4linux.de)
+ * Author       Fritz Elfert
+ * Copyright    by Fritz Elfert      <fritz@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
  * Thanks to Friedemann Baitinger and IBM Germany
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
  *
  */
 
 #ifndef act2000_h
 #define act2000_h
-
-#ifdef __KERNEL__
-/* Kernel includes */
-
-#include <linux/module.h>
-#include <linux/version.h>
-#endif
 
 #define ACT2000_IOCTL_SETPORT    1
 #define ACT2000_IOCTL_GETPORT    2
@@ -78,17 +62,16 @@ typedef struct act2000_fwid {
 
 #include <linux/sched.h>
 #include <linux/string.h>
-#include <linux/tqueue.h>
+#include <linux/workqueue.h>
 #include <linux/interrupt.h>
 #include <linux/skbuff.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/major.h>
-#include <asm/segment.h>
 #include <asm/io.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/ioport.h>
@@ -179,9 +162,9 @@ typedef struct act2000_card {
 	__u16 need_b3ack;                /* Flag: Need ACK for current skb   */
 	struct sk_buff *sbuf;            /* skb which is currently sent      */
 	struct timer_list ptimer;        /* Poll timer                       */
-	struct tq_struct snd_tq;         /* Task struct for xmit bh          */
-	struct tq_struct rcv_tq;         /* Task struct for rcv bh           */
-	struct tq_struct poll_tq;        /* Task struct for polled rcv bh    */
+	struct work_struct snd_tq;         /* Task struct for xmit bh          */
+	struct work_struct rcv_tq;         /* Task struct for rcv bh           */
+	struct work_struct poll_tq;        /* Task struct for polled rcv bh    */
 	msn_entry *msn_list;
 	unsigned short msgnum;           /* Message number fur sending       */
 	act2000_chan bch[ACT2000_BCH];   /* B-Channel status/control         */
@@ -196,20 +179,17 @@ typedef struct act2000_card {
 
 extern __inline__ void act2000_schedule_tx(act2000_card *card)
 {
-        queue_task(&card->snd_tq, &tq_immediate);
-        mark_bh(IMMEDIATE_BH);
+        schedule_work(&card->snd_tq);
 }
 
 extern __inline__ void act2000_schedule_rx(act2000_card *card)
 {
-        queue_task(&card->rcv_tq, &tq_immediate);
-        mark_bh(IMMEDIATE_BH);
+        schedule_work(&card->rcv_tq);
 }
 
 extern __inline__ void act2000_schedule_poll(act2000_card *card)
 {
-        queue_task(&card->poll_tq, &tq_immediate);
-        mark_bh(IMMEDIATE_BH);
+        schedule_work(&card->poll_tq);
 }
 
 extern char *act2000_find_eaz(act2000_card *, char);

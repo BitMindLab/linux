@@ -1,6 +1,6 @@
 /* 
         epat.c  (c) 1997-8  Grant R. Guenther <grant@torque.net>
-                            Under the terms of the GNU public license.
+                            Under the terms of the GNU General Public License.
 
 	This is the low level protocol driver for the EPAT parallel
         to IDE adapter from Shuttle Technologies.  This adapter is
@@ -12,12 +12,14 @@
 /* Changes:
 
         1.01    GRG 1998.05.06 init_proto, release_proto
+        1.02    Joshua b. Jore CPP(renamed), epat_connect, epat_disconnect
 
 */
 
-#define EPAT_VERSION      "1.01"
+#define EPAT_VERSION      "1.02"
 
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -197,30 +199,50 @@ static void epat_write_block( PIA *pi, char * buf, int count )
 #define WRi(r,v)         epat_write_regr(pi,0,r,v)
 #define RRi(r)           (epat_read_regr(pi,0,r))
 
-/* FIXME:  the CCP stuff should be fixed to handle multiple EPATs on a chain */
+/* FIXME:  the CPP stuff should be fixed to handle multiple EPATs on a chain */
 
-#define CCP(x) 	w2(4);w0(0x22);w0(0xaa);w0(0x55);w0(0);w0(0xff);\
+#define CPP(x) 	w2(4);w0(0x22);w0(0xaa);w0(0x55);w0(0);w0(0xff);\
                 w0(0x87);w0(0x78);w0(x);w2(4);w2(5);w2(4);w0(0xff);
 
 static void epat_connect ( PIA *pi )
 
 {       pi->saved_r0 = r0();
         pi->saved_r2 = r2();
-	CCP(0); CCP(0xe0);
+
+#ifdef CONFIG_PARIDE_EPATC8
+ 	/* Initialize the chip */
+        CPP(0);CPP(0x40);CPP(0xe0);              
+        w0(0);w2(1);w2(4);
+        WR(0x8,0x12);WR(0xc,0x14);WR(0x12,0x10);
+        WR(0xe,0xf);WR(0xf,4);
+     /* WR(0xe,0xa);WR(0xf,4); */
+        WR(0xe,0xd);WR(0xf,0);
+     /* CPP(0x30); */
+
+        /* Connect to the chip */
+	CPP(0xe0);
+        w0(0);w2(1);w2(4); /* Idle into SPP */
+        if (pi->mode >= 3) {
+          w0(0);w2(1);w2(4);w2(0xc);
+          /* Request EPP */
+          w0(0x40);w2(6);w2(7);w2(4);w2(0xc);w2(4);
+        }
+#else
+ 	CPP(0); CPP(0xe0);
 	w0(0); w2(1); w2(4);
 	if (pi->mode >= 3) {
 		w0(0); w2(1); w2(4); w2(0xc);
 		w0(0x40); w2(6); w2(7); w2(4); w2(0xc); w2(4);
 	}
 	WR(8,0x10); WR(0xc,0x14); WR(0xa,0x38); WR(0x12,0x10);
+#endif
 }
 
-static void epat_disconnect ( PIA *pi )
-
-{       CCP(0x30);
-        w0(pi->saved_r0);
-        w2(pi->saved_r2);
-} 
+static void epat_disconnect (PIA *pi)
+{	CPP(0x30);
+	w0(pi->saved_r0);
+	w2(pi->saved_r2);
+}
 
 static int epat_test_proto( PIA *pi, char * scratch, int verbose )
 
@@ -279,44 +301,33 @@ static void epat_log_adapter( PIA *pi, char * scratch, int verbose )
 
 }
 
-static void epat_init_proto( PIA *pi)
+static struct pi_protocol epat = {
+	.owner		= THIS_MODULE,
+	.name		= "epat",
+	.max_mode	= 6,
+	.epp_first	= 3,
+	.default_delay	= 1,
+	.max_units	= 1,
+	.write_regr	= epat_write_regr,
+	.read_regr	= epat_read_regr,
+	.write_block	= epat_write_block,
+	.read_block	= epat_read_block,
+	.connect	= epat_connect,
+	.disconnect	= epat_disconnect,
+	.test_proto	= epat_test_proto,
+	.log_adapter	= epat_log_adapter,
+};
 
-{  	MOD_INC_USE_COUNT;
+static int __init epat_init(void)
+{
+	return pi_register(&epat)-1;
 }
 
-static void epat_release_proto( PIA *pi)
-
-{	MOD_DEC_USE_COUNT;
+static void __exit epat_exit(void)
+{
+	pi_unregister(&epat);
 }
 
-struct pi_protocol epat = {"epat",0,6,3,1,1,
-			   epat_write_regr,
-			   epat_read_regr,
-			   epat_write_block,
-			   epat_read_block,
-			   epat_connect,
-			   epat_disconnect,
-			   0,
-			   0,
-			   epat_test_proto,
-			   epat_log_adapter,
-			   epat_init_proto,
-			   epat_release_proto
-			  };
-
-
-#ifdef MODULE
-
-int	init_module(void)
-
-{	return pi_register( &epat) - 1;
-}
-
-void	cleanup_module(void)
-
-{	pi_unregister( &epat);
-}
-
-#endif
-
-/* end of epat.c */
+MODULE_LICENSE("GPL");
+module_init(epat_init)
+module_exit(epat_exit)

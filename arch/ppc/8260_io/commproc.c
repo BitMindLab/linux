@@ -1,4 +1,3 @@
-
 /*
  * General Purpose functions for the global management of the
  * 8260 Communication Processor Module.
@@ -134,7 +133,7 @@ m8260_cpm_hostalloc(uint size, uint align)
  * Baud rate clocks are zero-based in the driver code (as that maps
  * to port numbers).  Documentation uses 1-based numbering.
  */
-#define BRG_INT_CLK	(((bd_t *)__res)->bi_brgfreq * 1000000)
+#define BRG_INT_CLK	(((bd_t *)__res)->bi_brgfreq)
 #define BRG_UART_CLK	(BRG_INT_CLK/16)
 
 /* This function is used by UARTS, or anything else that uses a 16x
@@ -166,8 +165,6 @@ m8260_cpm_fastbrg(uint brg, uint rate, int div16)
 {
 	volatile uint	*bp;
 
-	/* This is good enough to get SMCs running.....
-	*/
 	if (brg < 4) {
 		bp = (uint *)&immr->im_brgc1;
 	}

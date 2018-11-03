@@ -33,10 +33,9 @@
 static char *_rioinit_c_sccs_ = "@(#)rioinit.c	1.3";
 #endif
 
-#define __NO_VERSION__
 #include <linux/config.h>
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 #include <asm/io.h>
 #include <asm/system.h>
@@ -47,7 +46,6 @@ static char *_rioinit_c_sccs_ = "@(#)rioinit.c	1.3";
 #include <linux/termios.h>
 #include <linux/serial.h>
 
-#include <linux/compatmac.h>
 #include <linux/generic_serial.h>
 
 
@@ -145,7 +143,7 @@ struct RioHostInfo	* info;
 	p->RIOHosts[p->RIONumHosts].PaddrP	= info->location;
 
 	/*
-	** Check that we are able to accomodate another host
+	** Check that we are able to accommodate another host
 	*/
 	if ( p->RIONumHosts >= RIO_HOSTS )
 	{
@@ -1446,7 +1444,7 @@ struct rio_info	* p;
 				}
 				RIODefaultName(p, HostP, rup);
 			}
-			HostP->UnixRups[rup].RupLock = -1;
+			HostP->UnixRups[rup].RupLock = SPIN_LOCK_UNLOCKED;
 		}
 	}
 }
@@ -1543,8 +1541,10 @@ static struct rioVersion	stVersion;
 struct rioVersion *
 RIOVersid(void)
 {
-    strncpy(stVersion.version, "RIO driver for linux V1.0", 255);
-    strncpy(stVersion.buildDate, __DATE__, 255);
+    strlcpy(stVersion.version, "RIO driver for linux V1.0",
+	    sizeof(stVersion.version));
+    strlcpy(stVersion.buildDate, __DATE__,
+	    sizeof(stVersion.buildDate));
 
     return &stVersion;
 }

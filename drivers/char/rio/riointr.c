@@ -34,10 +34,10 @@ static char *_riointr_c_sccs_ = "@(#)riointr.c	1.2";
 #endif
 
 
-#define __NO_VERSION__
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
+#include <linux/tty.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/string.h>
@@ -47,7 +47,6 @@ static char *_riointr_c_sccs_ = "@(#)riointr.c	1.2";
 #include <linux/termios.h>
 #include <linux/serial.h>
 
-#include <linux/compatmac.h>
 #include <linux/generic_serial.h>
 
 #include <linux/delay.h>
@@ -818,7 +817,7 @@ struct Port *		PortP;
 	  ** and available space.
 	  */
 			
-	  transCount = min(PacketP->len & PKT_LEN_MASK,
+	  transCount = min_t(unsigned int, PacketP->len & PKT_LEN_MASK,
 			   TTY_FLIPBUF_SIZE - TtyP->flip.count);
 	  rio_dprintk (RIO_DEBUG_REC,  "port %d: Copy %d bytes\n", 
 				      PortP->PortNum, transCount);

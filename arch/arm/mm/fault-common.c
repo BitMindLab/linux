@@ -2,15 +2,42 @@
  *  linux/arch/arm/mm/fault-common.c
  *
  *  Copyright (C) 1995  Linus Torvalds
- *  Modifications for ARM processor (c) 1995-1999 Russell King
+ *  Modifications for ARM processor (c) 1995-2001 Russell King
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
 #include <linux/config.h>
+#include <linux/module.h>
+#include <linux/signal.h>
+#include <linux/sched.h>
+#include <linux/string.h>
+#include <linux/ptrace.h>
+#include <linux/mm.h>
+#include <linux/interrupt.h>
+#include <linux/init.h>
 
-extern void die(const char *msg, struct pt_regs *regs, int err);
+#include <asm/system.h>
+#include <asm/pgtable.h>
+#include <asm/tlbflush.h>
+#include <asm/uaccess.h>
+
+#include "fault.h"
+
+#ifdef CONFIG_CPU_26
+#define FAULT_CODE_WRITE	0x02
+#define FAULT_CODE_FORCECOW	0x01
+#define DO_COW(m)		((m) & (FAULT_CODE_WRITE|FAULT_CODE_FORCECOW))
+#define READ_FAULT(m)		(!((m) & FAULT_CODE_WRITE))
+#else
+/*
+ * "code" is actually the FSR register.  Bit 11 set means the
+ * instruction was performing a write.
+ */
+#define DO_COW(code)		((code) & (1 << 11))
+#define READ_FAULT(code)	(!DO_COW(code))
+#endif
 
 /*
  * This is useful to dump out the page tables associated with
@@ -25,7 +52,7 @@ void show_pte(struct mm_struct *mm, unsigned long addr)
 
 	printk(KERN_ALERT "pgd = %p\n", mm->pgd);
 	pgd = pgd_offset(mm, addr);
-	printk(KERN_ALERT "*pgd = %08lx", pgd_val(*pgd));
+	printk(KERN_ALERT "[%08lx] *pgd=%08lx", addr, pgd_val(*pgd));
 
 	do {
 		pmd_t *pmd;
@@ -40,7 +67,9 @@ void show_pte(struct mm_struct *mm, unsigned long addr)
 		}
 
 		pmd = pmd_offset(pgd, addr);
-		printk(", *pmd = %08lx", pmd_val(*pmd));
+#if PTRS_PER_PMD != 1
+		printk(", *pmd=%08lx", pmd_val(*pmd));
+#endif
 
 		if (pmd_none(*pmd))
 			break;
@@ -50,17 +79,92 @@ void show_pte(struct mm_struct *mm, unsigned long addr)
 			break;
 		}
 
-		pte = pte_offset(pmd, addr);
-		printk(", *pte = %08lx", pte_val(*pte));
+#ifndef CONFIG_HIGHMEM
+		/* We must not map this if we have highmem enabled */
+		pte = pte_offset_map(pmd, addr);
+		printk(", *pte=%08lx", pte_val(*pte));
 #ifdef CONFIG_CPU_32
-		printk(", *ppte = %08lx", pte_val(pte[-PTRS_PER_PTE]));
+		printk(", *ppte=%08lx", pte_val(pte[-PTRS_PER_PTE]));
+#endif
+		pte_unmap(pte);
 #endif
 	} while(0);
 
 	printk("\n");
 }
 
-static int __do_page_fault(struct mm_struct *mm, unsigned long addr, int mode, struct task_struct *tsk)
+/*
+ * Oops.  The kernel tried to access some page that wasn't present.
+ */
+static void
+__do_kernel_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
+		  struct pt_regs *regs)
+{
+	/*
+	 * Are we prepared to handle this kernel fault?
+	 */
+	if (fixup_exception(regs))
+		return;
+
+	/*
+	 * No handler, we'll have to terminate things with extreme prejudice.
+	 */
+	bust_spinlocks(1);
+	printk(KERN_ALERT
+		"Unable to handle kernel %s at virtual address %08lx\n",
+		(addr < PAGE_SIZE) ? "NULL pointer dereference" :
+		"paging request", addr);
+
+	show_pte(mm, addr);
+	die("Oops", regs, fsr);
+	bust_spinlocks(0);
+	do_exit(SIGKILL);
+}
+
+/*
+ * Something tried to access memory that isn't in our memory map..
+ * User mode accesses just cause a SIGSEGV
+ */
+static void
+__do_user_fault(struct task_struct *tsk, unsigned long addr,
+		unsigned int fsr, int code, struct pt_regs *regs)
+{
+	struct siginfo si;
+
+#ifdef CONFIG_DEBUG_USER
+	printk(KERN_DEBUG "%s: unhandled page fault at 0x%08lx, code 0x%03x\n",
+	       tsk->comm, addr, fsr);
+	show_pte(tsk->mm, addr);
+	show_regs(regs);
+#endif
+
+	tsk->thread.address = addr;
+	tsk->thread.error_code = fsr;
+	tsk->thread.trap_no = 14;
+	si.si_signo = SIGSEGV;
+	si.si_errno = 0;
+	si.si_code = code;
+	si.si_addr = (void *)addr;
+	force_sig_info(SIGSEGV, &si, tsk);
+}
+
+void
+do_bad_area(struct task_struct *tsk, struct mm_struct *mm, unsigned long addr,
+	    unsigned int fsr, struct pt_regs *regs)
+{
+	/*
+	 * If we are in kernel mode at this point, we
+	 * have no context to handle this fault with.
+	 */
+	if (user_mode(regs))
+		__do_user_fault(tsk, addr, fsr, SEGV_MAPERR, regs);
+	else
+		__do_kernel_fault(mm, addr, fsr, regs);
+}
+
+static int
+__do_page_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
+		struct task_struct *tsk)
 {
 	struct vm_area_struct *vma;
 	int fault, mask;
@@ -77,7 +181,7 @@ static int __do_page_fault(struct mm_struct *mm, unsigned long addr, int mode, s
 	 * memory access, so we can handle it.
 	 */
 good_area:
-	if (READ_FAULT(mode)) /* read? */
+	if (READ_FAULT(fsr)) /* read? */
 		mask = VM_READ|VM_EXEC;
 	else
 		mask = VM_WRITE;
@@ -92,7 +196,7 @@ good_area:
 	 * than endlessly redo the fault.
 	 */
 survive:
-	fault = handle_mm_fault(mm, vma, addr & PAGE_MASK, DO_COW(mode));
+	fault = handle_mm_fault(mm, vma, addr & PAGE_MASK, DO_COW(fsr));
 
 	/*
 	 * Handle the "normal" cases first - successful and sigbus
@@ -115,8 +219,7 @@ survive:
 	 * If we are out of memory for pid1,
 	 * sleep for a while and retry
 	 */
-	tsk->policy |= SCHED_YIELD;
-	schedule();
+	yield();
 	goto survive;
 
 check_stack:
@@ -126,60 +229,14 @@ out:
 	return fault;
 }
 
-static int __do_vmalloc_fault(unsigned long addr, struct mm_struct *mm)
-{
-	/* Synchronise this task's top level page-table
-	 * with the 'reference' page table.
-	 */
-	int offset = __pgd_offset(addr);
-	pgd_t *pgd, *pgd_k;
-	pmd_t *pmd, *pmd_k;
-
-	pgd_k = init_mm.pgd + offset;
-	if (!pgd_present(*pgd_k))
-		goto bad_area;
-
-	pgd = mm->pgd + offset;
-#if 0	/* note that we are two-level */
-	if (!pgd_present(*pgd))
-		set_pgd(pgd, *pgd_k);
-#endif
-
-	pmd_k = pmd_offset(pgd_k, addr);
-	if (pmd_none(*pmd_k))
-		goto bad_area;
-
-	pmd = pmd_offset(pgd, addr);
-	if (!pmd_none(*pmd))
-		goto bad_area;
-	set_pmd(pmd, *pmd_k);
-	return 1;
-
-bad_area:
-	return -2;
-}
-
-static int do_page_fault(unsigned long addr, int mode, struct pt_regs *regs)
+int do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 {
 	struct task_struct *tsk;
 	struct mm_struct *mm;
-	unsigned long fixup;
 	int fault;
 
 	tsk = current;
 	mm  = tsk->mm;
-
-	/*
-	 * We fault-in kernel-space virtual memory on-demand. The
-	 * 'reference' page table is init_mm.pgd.
-	 *
-	 * NOTE! We MUST NOT take any locks for this case. We may
-	 * be in an interrupt or a critical region, and should
-	 * only copy the information from the master page table,
-	 * nothing more.
-	 */
-	if (addr >= TASK_SIZE)
-		goto vmalloc_fault;
 
 	/*
 	 * If we're in an interrupt or have no user
@@ -188,11 +245,10 @@ static int do_page_fault(unsigned long addr, int mode, struct pt_regs *regs)
 	if (in_interrupt() || !mm)
 		goto no_context;
 
-	down(&mm->mmap_sem);
-	fault = __do_page_fault(mm, addr, mode, tsk);
-	up(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
+	fault = __do_page_fault(mm, addr, fsr, tsk);
+	up_read(&mm->mmap_sem);
 
-ret:
 	/*
 	 * Handle the "normal" case first
 	 */
@@ -220,28 +276,9 @@ ret:
 		 */
 		printk("VM: killing process %s\n", tsk->comm);
 		do_exit(SIGKILL);
-	} else {
-		/*
-		 * Something tried to access memory that isn't in our memory map..
-		 * User mode accesses just cause a SIGSEGV
-		 */
-		struct siginfo si;
-
-#ifdef CONFIG_DEBUG_USER
-		printk(KERN_DEBUG "%s: unhandled page fault at pc=0x%08lx, "
-		       "lr=0x%08lx (bad address=0x%08lx, code %d)\n",
-		       tsk->comm, regs->ARM_pc, regs->ARM_lr, addr, mode);
-#endif
-
-		tsk->thread.address = addr;
-		tsk->thread.error_code = mode;
-		tsk->thread.trap_no = 14;
-		si.si_signo = SIGSEGV;
-		si.si_errno = 0;
-		si.si_code = fault == -1 ? SEGV_ACCERR : SEGV_MAPERR;
-		si.si_addr = (void *)addr;
-		force_sig_info(SIGSEGV, &si, tsk);
-	}
+	} else
+		__do_user_fault(tsk, addr, fsr, fault == -1 ?
+				SEGV_ACCERR : SEGV_MAPERR, regs);
 	return 0;
 
 
@@ -255,39 +292,77 @@ do_sigbus:
 	 * or user mode.
 	 */
 	tsk->thread.address = addr;
-	tsk->thread.error_code = mode;
+	tsk->thread.error_code = fsr;
 	tsk->thread.trap_no = 14;
 	force_sig(SIGBUS, tsk);
+#ifdef CONFIG_DEBUG_USER
+	printk(KERN_DEBUG "%s: sigbus at 0x%08lx, pc=0x%08lx\n",
+		current->comm, addr, instruction_pointer(regs));
+#endif
 
 	/* Kernel mode? Handle exceptions or die */
 	if (user_mode(regs))
 		return 0;
 
 no_context:
-	/* Are we prepared to handle this kernel fault?  */
-	if ((fixup = search_exception_table(instruction_pointer(regs))) != 0) {
-#ifdef DEBUG
-		printk(KERN_DEBUG "%s: Exception at [<%lx>] addr=%lx (fixup: %lx)\n",
-			tsk->comm, regs->ARM_pc, addr, fixup);
-#endif
-		regs->ARM_pc = fixup;
-		return 0;
-	}
+	__do_kernel_fault(mm, addr, fsr, regs);
+	return 0;
+}
+
+/*
+ * First Level Translation Fault Handler
+ *
+ * We enter here because the first level page table doesn't contain
+ * a valid entry for the address.
+ *
+ * If the address is in kernel space (>= TASK_SIZE), then we are
+ * probably faulting in the vmalloc() area.
+ *
+ * If the init_task's first level page tables contains the relevant
+ * entry, we copy the it to this task.  If not, we send the process
+ * a signal, fixup the exception, or oops the kernel.
+ *
+ * NOTE! We MUST NOT take any locks for this case. We may be in an
+ * interrupt or a critical region, and should only copy the information
+ * from the master page table, nothing more.
+ */
+int do_translation_fault(unsigned long addr, unsigned int fsr,
+			 struct pt_regs *regs)
+{
+	struct task_struct *tsk;
+	unsigned int index;
+	pgd_t *pgd, *pgd_k;
+	pmd_t *pmd, *pmd_k;
+
+	if (addr < TASK_SIZE)
+		return do_page_fault(addr, fsr, regs);
+
+	index = pgd_index(addr);
 
 	/*
-	 * Oops. The kernel tried to access some bad page. We'll have to
-	 * terminate things with extreme prejudice.
+	 * FIXME: CP15 C1 is write only on ARMv3 architectures.
 	 */
-	printk(KERN_ALERT "Unable to handle kernel %s at virtual address %08lx\n",
-		(addr < PAGE_SIZE) ? "NULL pointer dereference" : "paging request", addr);
+	pgd = cpu_get_pgd() + index;
+	pgd_k = init_mm.pgd + index;
 
-	show_pte(mm, addr);
-	die("Oops", regs, mode);
-	do_exit(SIGKILL);
+	if (pgd_none(*pgd_k))
+		goto bad_area;
 
+	if (!pgd_present(*pgd))
+		set_pgd(pgd, *pgd_k);
+
+	pmd_k = pmd_offset(pgd_k, addr);
+	pmd   = pmd_offset(pgd, addr);
+
+	if (pmd_none(*pmd_k))
+		goto bad_area;
+
+	set_pmd(pmd, *pmd_k);
 	return 0;
 
-vmalloc_fault:
-	fault = __do_vmalloc_fault(addr, mm);
-	goto ret;
+bad_area:
+	tsk = current;
+
+	do_bad_area(tsk, tsk->active_mm, addr, fsr, regs);
+	return 0;
 }

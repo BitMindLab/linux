@@ -14,14 +14,12 @@
  *	LAPB 002	Jonathan Naylor	New timer architecture.
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_LAPB) || defined(CONFIG_LAPB_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
@@ -39,7 +37,7 @@
 static void lapb_t1timer_expiry(unsigned long);
 static void lapb_t2timer_expiry(unsigned long);
 
-void lapb_start_t1timer(lapb_cb *lapb)
+void lapb_start_t1timer(struct lapb_cb *lapb)
 {
 	del_timer(&lapb->t1timer);
 
@@ -50,7 +48,7 @@ void lapb_start_t1timer(lapb_cb *lapb)
 	add_timer(&lapb->t1timer);
 }
 
-void lapb_start_t2timer(lapb_cb *lapb)
+void lapb_start_t2timer(struct lapb_cb *lapb)
 {
 	del_timer(&lapb->t2timer);
 
@@ -61,24 +59,24 @@ void lapb_start_t2timer(lapb_cb *lapb)
 	add_timer(&lapb->t2timer);
 }
 
-void lapb_stop_t1timer(lapb_cb *lapb)
+void lapb_stop_t1timer(struct lapb_cb *lapb)
 {
 	del_timer(&lapb->t1timer);
 }
 
-void lapb_stop_t2timer(lapb_cb *lapb)
+void lapb_stop_t2timer(struct lapb_cb *lapb)
 {
 	del_timer(&lapb->t2timer);
 }
 
-int lapb_t1timer_running(lapb_cb *lapb)
+int lapb_t1timer_running(struct lapb_cb *lapb)
 {
 	return timer_pending(&lapb->t1timer);
 }
 
 static void lapb_t2timer_expiry(unsigned long param)
 {
-	lapb_cb *lapb = (lapb_cb *)param;
+	struct lapb_cb *lapb = (struct lapb_cb *)param;
 
 	if (lapb->condition & LAPB_ACK_PENDING_CONDITION) {
 		lapb->condition &= ~LAPB_ACK_PENDING_CONDITION;
@@ -88,7 +86,7 @@ static void lapb_t2timer_expiry(unsigned long param)
 
 static void lapb_t1timer_expiry(unsigned long param)
 {
-	lapb_cb *lapb = (lapb_cb *)param;
+	struct lapb_cb *lapb = (struct lapb_cb *)param;
 
 	switch (lapb->state) {
 
@@ -189,5 +187,3 @@ static void lapb_t1timer_expiry(unsigned long param)
 
 	lapb_start_t1timer(lapb);
 }
-
-#endif

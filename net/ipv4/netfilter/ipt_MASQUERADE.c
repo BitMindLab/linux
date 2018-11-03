@@ -1,5 +1,6 @@
 /* Masquerade.  Simple mapping which alters range to a local IP address
    (depending on route). */
+#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/ip.h>
 #include <linux/timer.h>
@@ -10,6 +11,10 @@
 #include <linux/netfilter_ipv4.h>
 #include <linux/netfilter_ipv4/ip_nat_rule.h>
 #include <linux/netfilter_ipv4/ip_tables.h>
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+MODULE_DESCRIPTION("iptables MASQUERADE target module");
 
 #if 0
 #define DEBUGP printk
@@ -56,9 +61,9 @@ masquerade_check(const char *tablename,
 
 static unsigned int
 masquerade_target(struct sk_buff **pskb,
-		  unsigned int hooknum,
 		  const struct net_device *in,
 		  const struct net_device *out,
+		  unsigned int hooknum,
 		  const void *targinfo,
 		  void *userinfo)
 {
@@ -82,13 +87,28 @@ masquerade_target(struct sk_buff **pskb,
 
 	mr = targinfo;
 
-	if (ip_route_output(&rt, (*pskb)->nh.iph->daddr,
-			    0,
-			    RT_TOS((*pskb)->nh.iph->tos)|RTO_CONN,
-			    out->ifindex) != 0) {
-		/* Shouldn't happen */
-		printk("MASQUERADE: No route: Rusty's brain broke!\n");
-		return NF_DROP;
+	{
+		struct flowi fl = { .nl_u = { .ip4_u =
+					      { .daddr = (*pskb)->nh.iph->daddr,
+						.tos = (RT_TOS((*pskb)->nh.iph->tos) |
+							RTO_CONN),
+#ifdef CONFIG_IP_ROUTE_FWMARK
+						.fwmark = (*pskb)->nfmark
+#endif
+					      } } };
+		if (ip_route_output_key(&rt, &fl) != 0) {
+			/* Funky routing can do this. */
+			if (net_ratelimit())
+				printk("MASQUERADE:"
+				       " No route: Rusty's brain broke!\n");
+			return NF_DROP;
+		}
+		if (rt->u.dst.dev != out) {
+			if (net_ratelimit())
+				printk("MASQUERADE:"
+				       " Route sent us somewhere else.\n");
+			return NF_DROP;
+		}
 	}
 
 	newsrc = rt->rt_src;
@@ -110,44 +130,45 @@ masquerade_target(struct sk_buff **pskb,
 }
 
 static inline int
-device_cmp(const struct ip_conntrack *i, void *ifindex)
+device_cmp(const struct ip_conntrack *i, void *_ina)
 {
-	int ret;
+	int ret = 0;
+	struct in_ifaddr *ina = _ina;
 
 	READ_LOCK(&masq_lock);
-	ret = (i->nat.masq_index == (int)(long)ifindex);
+	/* If it's masquerading out this interface with a different address,
+	   or we don't know the new address of this interface. */
+	if (i->nat.masq_index == ina->ifa_dev->dev->ifindex
+	    && i->tuplehash[IP_CT_DIR_REPLY].tuple.dst.ip != ina->ifa_address)
+		ret = 1;
 	READ_UNLOCK(&masq_lock);
 
 	return ret;
 }
 
-int masq_device_event(struct notifier_block *this,
-		      unsigned long event,
-		      void *ptr)
+static int masq_inet_event(struct notifier_block *this,
+			   unsigned long event,
+			   void *ptr)
 {
-	struct net_device *dev = ptr;
-
-	if (event == NETDEV_DOWN || event == NETDEV_CHANGEADDR) {
-		/* Device was downed/changed (diald)  Search entire table for
-		   conntracks which were associated with that device,
-		   and forget them. */
-		IP_NF_ASSERT(dev->ifindex != 0);
-
-		ip_ct_selective_cleanup(device_cmp, (void *)(long)dev->ifindex);
-	}
+	/* For some configurations, interfaces often come back with
+	 * the same address.  If not, clean up old conntrack
+	 * entries. */
+	if (event == NETDEV_UP)
+		ip_ct_selective_cleanup(device_cmp, ptr);
 
 	return NOTIFY_DONE;
 }
 
-static struct notifier_block masq_dev_notifier = {
-	masq_device_event,
-	NULL,
-	0
+static struct notifier_block masq_inet_notifier = {
+	.notifier_call	= masq_inet_event,
 };
 
-static struct ipt_target masquerade
-= { { NULL, NULL }, "MASQUERADE", masquerade_target, masquerade_check, NULL,
-    THIS_MODULE };
+static struct ipt_target masquerade = {
+	.name		= "MASQUERADE",
+	.target		= masquerade_target,
+	.checkentry	= masquerade_check,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {
@@ -155,10 +176,9 @@ static int __init init(void)
 
 	ret = ipt_register_target(&masquerade);
 
-	if (ret == 0) {
-		/* Register for device down reports */
-		register_netdevice_notifier(&masq_dev_notifier);
-	}
+	if (ret == 0)
+		/* Register IP address change reports */
+		register_inetaddr_notifier(&masq_inet_notifier);
 
 	return ret;
 }
@@ -166,7 +186,7 @@ static int __init init(void)
 static void __exit fini(void)
 {
 	ipt_unregister_target(&masquerade);
-	unregister_netdevice_notifier(&masq_dev_notifier);
+	unregister_inetaddr_notifier(&masq_inet_notifier);	
 }
 
 module_init(init);

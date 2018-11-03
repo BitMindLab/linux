@@ -30,12 +30,14 @@
  *		Alan Cox	: Protect against forwarding explosions with
  *				  older network drivers and IFF_ALLMULTI.
  *	Christer Weinigel	: Better rebuild header message.
+ *             Andrew Morton    : 26Feb01: kill ether_setup() - use netdev_boot_setup().
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
  */
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -60,31 +62,9 @@
 #include <asm/system.h>
 #include <asm/checksum.h>
 
-static int __init eth_setup(char *str)
-{
-	int ints[5];
-	struct ifmap map;
+extern int __init netdev_boot_setup(char *str);
 
-	str = get_options(str, ARRAY_SIZE(ints), ints);
-	if (!str || !*str)
-		return 0;
-
- 	/* Save settings */
- 	memset(&map, -1, sizeof(map));
-	if (ints[0] > 0)
-		map.irq = ints[1];
-	if (ints[0] > 1)
-		map.base_addr = ints[2];
-	if (ints[0] > 2)
-		map.mem_start = ints[3];
-	if (ints[0] > 3)
-		map.mem_end = ints[4];
-
-	/* Add new entry to the list */
-	return netdev_boot_setup_add(str, &map);
-}
-
-__setup("ether=", eth_setup);
+__setup("ether=", netdev_boot_setup);
 
 /*
  *	 Create the Ethernet MAC header for an arbitrary protocol layer 
@@ -124,16 +104,16 @@ int eth_header(struct sk_buff *skb, struct net_device *dev, unsigned short type,
 	if (dev->flags & (IFF_LOOPBACK|IFF_NOARP)) 
 	{
 		memset(eth->h_dest, 0, dev->addr_len);
-		return(dev->hard_header_len);
+		return ETH_HLEN;
 	}
 	
 	if(daddr)
 	{
 		memcpy(eth->h_dest,daddr,dev->addr_len);
-		return dev->hard_header_len;
+		return ETH_HLEN;
 	}
 	
-	return -dev->hard_header_len;
+	return -ETH_HLEN;
 }
 
 
@@ -182,7 +162,7 @@ unsigned short eth_type_trans(struct sk_buff *skb, struct net_device *dev)
 	unsigned char *rawp;
 	
 	skb->mac.raw=skb->data;
-	skb_pull(skb,dev->hard_header_len);
+	skb_pull(skb,ETH_HLEN);
 	eth= skb->mac.ethernet;
 	
 	if(*eth->h_dest&1)
@@ -237,8 +217,11 @@ int eth_header_parse(struct sk_buff *skb, unsigned char *haddr)
 int eth_header_cache(struct neighbour *neigh, struct hh_cache *hh)
 {
 	unsigned short type = hh->hh_type;
-	struct ethhdr *eth = (struct ethhdr*)(((u8*)hh->hh_data) + 2);
+	struct ethhdr *eth;
 	struct net_device *dev = neigh->dev;
+
+	eth = (struct ethhdr*)
+		(((u8*)hh->hh_data) + (HH_DATA_OFF(sizeof(*eth))));
 
 	if (type == __constant_htons(ETH_P_802_3))
 		return -1;
@@ -256,5 +239,8 @@ int eth_header_cache(struct neighbour *neigh, struct hh_cache *hh)
 
 void eth_header_cache_update(struct hh_cache *hh, struct net_device *dev, unsigned char * haddr)
 {
-	memcpy(((u8*)hh->hh_data) + 2, haddr, dev->addr_len);
+	memcpy(((u8*)hh->hh_data) + HH_DATA_OFF(sizeof(struct ethhdr)),
+	       haddr, dev->addr_len);
 }
+
+EXPORT_SYMBOL(eth_type_trans);

@@ -1,13 +1,9 @@
 #ifndef _NET_TCP_ECN_H_
 #define _NET_TCP_ECN_H_ 1
 
-#include <linux/config.h>
-
-#ifdef CONFIG_INET_ECN
-
 #include <net/inet_ecn.h>
 
-#define TCP_HP_BITS (~(TCP_RESERVED_BITS|TCP_FLAG_PSH)|TCP_FLAG_ECE|TCP_FLAG_CWR)
+#define TCP_HP_BITS (~(TCP_RESERVED_BITS|TCP_FLAG_PSH))
 
 #define	TCP_ECN_OK		1
 #define TCP_ECN_QUEUE_CWR	2
@@ -32,12 +28,13 @@ TCP_ECN_send_synack(struct tcp_opt *tp, struct sk_buff *skb)
 }
 
 static __inline__ void
-TCP_ECN_send_syn(struct tcp_opt *tp, struct sk_buff *skb)
+TCP_ECN_send_syn(struct sock *sk, struct tcp_opt *tp, struct sk_buff *skb)
 {
 	tp->ecn_flags = 0;
-	if (sysctl_tcp_ecn) {
+	if (sysctl_tcp_ecn && !(sk->sk_route_caps & NETIF_F_TSO)) {
 		TCP_SKB_CB(skb)->flags |= TCPCB_FLAG_ECE|TCPCB_FLAG_CWR;
 		tp->ecn_flags = TCP_ECN_OK;
+		sk->sk_no_largesend = 1;
 	}
 }
 
@@ -132,31 +129,5 @@ TCP_ECN_create_request(struct open_request *req, struct tcphdr *th)
 	if (sysctl_tcp_ecn && th->ece && th->cwr)
 		req->ecn_ok = 1;
 }
-
-
-
-#else
-
-#define TCP_HP_BITS (~(TCP_RESERVED_BITS|TCP_FLAG_PSH))
-
-
-#define TCP_ECN_send_syn(x...)		do { } while (0)
-#define TCP_ECN_send_synack(x...)	do { } while (0)
-#define TCP_ECN_make_synack(x...)	do { } while (0)
-#define TCP_ECN_send(x...)		do { } while (0)
-
-#define TCP_ECN_queue_cwr(x...)		do { } while (0)
-
-#define TCP_ECN_accept_cwr(x...)	do { } while (0)
-#define TCP_ECN_check_ce(x...)		do { } while (0)
-#define TCP_ECN_rcv_synack(x...)	do { } while (0)
-#define TCP_ECN_rcv_syn(x...)		do { } while (0)
-#define TCP_ECN_rcv_ecn_echo(x...)	(0)
-#define TCP_ECN_openreq_child(x...)	do { } while (0)
-#define TCP_ECN_create_request(x...)	do { } while (0)
-#define TCP_ECN_withdraw_cwr(x...)	do { } while (0)
-
-
-#endif
 
 #endif

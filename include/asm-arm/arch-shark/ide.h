@@ -1,7 +1,7 @@
 /*
  * linux/include/asm-arm/arch-shark/ide.h
  *
- * by Alexander.Schulz@stud.uni-karlsruhe.de
+ * by Alexander Schulz
  *
  * derived from:
  * linux/include/asm-arm/arch-ebsa285/ide.h
@@ -42,6 +42,6 @@ ide_init_default_hwifs(void)
 
 	ide_init_hwif_ports(&hw, 0x1f0, 0x3f6, NULL);
 	hw.irq = 14;
-	ide_register_hw(&hw, NULL);
+	ide_register_hw(&hw,NULL);
 }
 

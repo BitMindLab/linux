@@ -30,8 +30,7 @@
 
 #include <linux/errno.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
-#include <asm/segment.h>
+#include <linux/slab.h>
 
 #include <linux/zftape.h>
 #include "../zftape/zftape-init.h"
@@ -144,7 +143,7 @@ static int vtbl_signature_valid(__u8 signature[4])
  * using the keyword "blocksize". The blocksize written to the
  * volume-label is in bytes.
  *
- * We use this now only for compatability with old zftape version. We
+ * We use this now only for compatibility with old zftape version. We
  * store the blocksize directly as binary number in the vendor
  * extension part of the volume entry.
  */
@@ -431,7 +430,7 @@ int zft_extract_volume_headers(__u8 *buffer)
 /* this functions translates the failed_sector_log, misused as
  * EOF-marker list, into a virtual volume table. The table mustn't be
  * written to tape, because this would occupy the first data segment,
- * which should be the volume table, but is actualy the first segment
+ * which should be the volume table, but is actually the first segment
  * that is filled with data (when using standard ftape).  We assume,
  * that we get a non-empty failed_sector_log.
  */

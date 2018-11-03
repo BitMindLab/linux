@@ -1,30 +1,20 @@
-/* $Id: eicon.h,v 1.23 2000/06/21 11:28:42 armin Exp $
+/* $Id: eicon.h,v 1.1.4.1.2.3 2002/10/01 11:29:13 armin Exp $
  *
  * ISDN low-level module for Eicon active ISDN-Cards.
  *
- * Copyright 1998    by Fritz Elfert (fritz@isdn4linux.de)
+ * Copyright 1998       by Fritz Elfert (fritz@isdn4linux.de)
  * Copyright 1998-2000  by Armin Schindler (mac@melware.de) 
  * Copyright 1999,2000  Cytronics & Melware (info@melware.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-
 #ifndef eicon_h
 #define eicon_h
+
+#include <linux/interrupt.h>
 
 #define EICON_IOCTL_SETMMIO   0
 #define EICON_IOCTL_GETMMIO   1
@@ -129,17 +119,16 @@ typedef struct {
 #include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/string.h>
-#include <linux/tqueue.h>
+#include <linux/workqueue.h>
 #include <linux/interrupt.h>
 #include <linux/skbuff.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/major.h>
-#include <asm/segment.h>
 #include <asm/io.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/ioport.h>
@@ -147,6 +136,7 @@ typedef struct {
 #include <linux/wait.h>
 #include <linux/delay.h>
 #include <linux/ctype.h>
+#include <linux/pci.h>
 
 #include <linux/isdn.h>
 #include <linux/isdnif.h>
@@ -317,7 +307,7 @@ typedef struct {
  * Per card driver data
  */
 typedef struct eicon_card {
-	eicon_hwif hwif;                 /* Hardware dependant interface     */
+	eicon_hwif hwif;                 /* Hardware dependent interface     */
 	DESCRIPTOR *d;			 /* IDI Descriptor		     */
         u_char ptype;                    /* Protocol type (1TR6 or Euro)     */
         u_char bus;                      /* Bustype (ISA, MCA, PCI)          */
@@ -333,9 +323,9 @@ typedef struct eicon_card {
 	struct sk_buff_head sackq;       /* Data-Ack-Message queue           */
 	struct sk_buff_head statq;       /* Status-Message queue             */
 	int statq_entries;
-	struct tq_struct snd_tq;         /* Task struct for xmit bh          */
-	struct tq_struct rcv_tq;         /* Task struct for rcv bh           */
-	struct tq_struct ack_tq;         /* Task struct for ack bh           */
+	struct tasklet_struct snd_tq;    /* Task struct for xmit bh          */
+	struct tasklet_struct rcv_tq;    /* Task struct for rcv bh           */
+	struct tasklet_struct ack_tq;    /* Task struct for ack bh           */
 	eicon_chan*	IdTable[256];	 /* Table to find entity   */
 	__u16  ref_in;
 	__u16  ref_out;
@@ -361,25 +351,22 @@ extern char *eicon_ctype_name[];
 
 extern __inline__ void eicon_schedule_tx(eicon_card *card)
 {
-        queue_task(&card->snd_tq, &tq_immediate);
-        mark_bh(IMMEDIATE_BH);
+	tasklet_schedule(&card->snd_tq);
 }
 
 extern __inline__ void eicon_schedule_rx(eicon_card *card)
 {
-        queue_task(&card->rcv_tq, &tq_immediate);
-        mark_bh(IMMEDIATE_BH);
+	tasklet_schedule(&card->rcv_tq);
 }
 
 extern __inline__ void eicon_schedule_ack(eicon_card *card)
 {
-        queue_task(&card->ack_tq, &tq_immediate);
-        mark_bh(IMMEDIATE_BH);
+	tasklet_schedule(&card->ack_tq);
 }
 
 extern int eicon_addcard(int, int, int, char *, int);
 extern void eicon_io_transmit(eicon_card *card);
-extern void eicon_irq(int irq, void *dev_id, struct pt_regs *regs);
+extern irqreturn_t eicon_irq(int irq, void *dev_id, struct pt_regs *regs);
 extern void eicon_io_rcv_dispatch(eicon_card *ccard);
 extern void eicon_io_ack_dispatch(eicon_card *ccard);
 #ifdef CONFIG_MCA

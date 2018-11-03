@@ -33,7 +33,7 @@
  *    derived from this software without specific prior written permission.
  *
  * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
+ * the GNU General Public License ("GPL") and the terms of the GPL would require the 
  * combined work to also be released under the terms of the GPL, the terms
  * and conditions of this License will apply in addition to those of the
  * GPL with the exception of any terms or conditions of this License that
@@ -54,6 +54,7 @@
  **************************************************************************/
 
 #include <linux/config.h>
+#include <linux/types.h>
 
 #define ULONG   unsigned long
 #define USHORT  unsigned short
@@ -64,21 +65,8 @@
 #define UBYTE   unsigned char
 #define UWORD   unsigned short
 #define UDWORD  unsigned long
-#ifdef ALPHA
-#define U32     unsigned int
-#else
-#define U32     unsigned long
-#endif
+#define U32     u32
 
-#ifndef NULL
-#define NULL     0		/* zero          */
-#endif
-#ifndef TRUE
-#define TRUE     (1)		/* boolean true  */
-#endif
-#ifndef FALSE
-#define FALSE    (0)		/* boolean false */
-#endif
 #ifndef FAILURE
 #define FAILURE  (-1)
 #endif
@@ -600,11 +588,9 @@ typedef struct Ha_Ctrl_Struc {
 	TCS HCS_Tcs[MAX_TARGETS];	/* 78 */
 	ULONG pSRB_head;	/* SRB save queue header     */
 	ULONG pSRB_tail;	/* SRB save queue tail       */
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
 	spinlock_t HCS_AvailLock;
 	spinlock_t HCS_SemaphLock;
 	spinlock_t pSRB_lock;	/* SRB queue lock            */
-#endif
 } HCS;
 
 /* Bit Definition for HCB_Config */

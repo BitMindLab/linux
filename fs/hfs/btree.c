@@ -2,7 +2,7 @@
  * linux/fs/hfs/btree.c
  *
  * Copyright (C) 1995-1997  Paul H. Hargrove
- * This file may be distributed under the terms of the GNU Public License.
+ * This file may be distributed under the terms of the GNU General Public License.
  *
  * This file contains the code to manipulate the B-tree structure.
  * The catalog and extents files are both B-trees.
@@ -172,8 +172,7 @@ struct hfs_btree * hfs_btree_init(struct hfs_mdb *mdb, ino_t cnid,
 	bt->magic = HFS_BTREE_MAGIC;
 	bt->sys_mdb = mdb->sys_mdb;
 	bt->reserved = 0;
-	bt->lock = 0;
-	hfs_init_waitqueue(&bt->wait);
+	sema_init(&bt->sem, 1);
 	bt->dirt = 0;
 	memset(bt->cache, 0, sizeof(bt->cache));
 

@@ -1,9 +1,12 @@
-/* $Id: jade.h,v 1.3 2000/06/26 08:59:14 keil Exp $
- * jade.h   JADE specific defines
+/* $Id: jade.h,v 1.3.6.2 2001/09/23 22:24:49 kai Exp $
  *
- * Author   Roland Klabunde (R.Klabunde@Berkom.de)
+ * JADE specific defines
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Author       Roland Klabunde
+ * Copyright    by Roland Klabunde   <R.Klabunde@Berkom.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -124,10 +127,10 @@
 #define	jade_TXAUDIOCH1CFG				0x17
 #define	jade_TXAUDIOCH2CFG				0x1A
 
-extern int JadeVersion(struct IsdnCardState *cs, char *s);
 extern void jade_sched_event(struct BCState *bcs, int event);
 extern void modejade(struct BCState *bcs, int mode, int bc);
-extern void clear_pending_jade_ints(struct IsdnCardState *cs);
 extern void initjade(struct IsdnCardState *cs);
+extern void jade_int_main(struct IsdnCardState *cs, u8 val, int jade);
+extern int  jade_setup(struct IsdnCardState *cs, struct bc_hw_ops *jade_ops);
 
 #endif	/* __JADE_H__ */

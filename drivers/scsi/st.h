@@ -1,19 +1,17 @@
 
 #ifndef _ST_H
 #define _ST_H
-/*
-   $Header: /usr/src/linux/kernel/blk_drv/scsi/RCS/st.h,v 1.1 1992/04/24 18:01:50 root Exp root $
- */
 
 #ifndef _SCSI_H
 #include "scsi.h"
 #endif
-#include <linux/devfs_fs_kernel.h>
+#include <linux/completion.h>
 
 /* The tape buffer descriptor. */
 typedef struct {
 	unsigned char in_use;
 	unsigned char dma;	/* DMA-able buffer */
+	unsigned char do_dio;   /* direct i/o set up? */
 	int buffer_size;
 	int buffer_blocks;
 	int buffer_bytes;
@@ -23,12 +21,20 @@ typedef struct {
 	int syscall_result;
 	Scsi_Request *last_SRpnt;
 	unsigned char *b_data;
-	unsigned short use_sg;	/* zero or number of segments for this adapter */
-	unsigned short sg_segs;	/* total number of allocated segments */
-	unsigned short orig_sg_segs;	/* number of segments allocated at first try */
+	unsigned short use_sg;	/* zero or max number of s/g segments for this adapter */
+	unsigned short sg_segs;		/* number of segments in s/g list */
+	unsigned short orig_frp_segs;	/* number of segments allocated at first try */
+	unsigned short frp_segs;	/* number of buffer segments */
+	unsigned int frp_sg_current;	/* driver buffer length currently in s/g list */
+	struct st_buf_fragment *frp;	/* the allocated buffer fragment list */
 	struct scatterlist sg[1];	/* MUST BE last item */
 } ST_buffer;
 
+/* The tape buffer fragment descriptor */
+struct st_buf_fragment {
+	struct page *page;
+	unsigned int length;
+};
 
 /* The tape mode definition */
 typedef struct {
@@ -64,10 +70,10 @@ typedef struct {
 
 /* The tape drive descriptor */
 typedef struct {
-	kdev_t devt;
+	struct scsi_driver *driver;
 	Scsi_Device *device;
 	struct semaphore lock;	/* For serialization */
-	struct semaphore sem;	/* For SCSI commands */
+	struct completion wait;	/* For SCSI commands */
 	ST_buffer *buffer;
 
 	/* Drive characteristics */
@@ -77,19 +83,26 @@ typedef struct {
 	unsigned char can_partitions;
 	unsigned char two_fm;
 	unsigned char fast_mteom;
+	unsigned char immediate;
 	unsigned char restr_dma;
 	unsigned char scsi2_logical;
 	unsigned char default_drvbuffer;	/* 0xff = don't touch, value 3 bits */
+	unsigned char cln_mode;			/* 0 = none, otherwise sense byte nbr */
+	unsigned char cln_sense_value;
+	unsigned char cln_sense_mask;
+	unsigned char use_pf;			/* Set Page Format bit in all mode selects? */
+	unsigned char try_dio;			/* try direct i/o? */
+	unsigned char c_algo;			/* compression algorithm */
+	unsigned char pos_unknown;			/* after reset position unknown */
 	int tape_type;
-	int write_threshold;
 	int timeout;		/* timeout for normal commands */
 	int long_timeout;	/* timeout for commands known to take long time */
+
+	unsigned long max_pfn;	/* the maximum page number reachable by the HBA */
 
 	/* Mode characteristics */
 	ST_mode modes[ST_NBR_MODES];
 	int current_mode;
-	devfs_handle_t de_r[ST_NBR_MODES];  /*  Rewind entries     */
-	devfs_handle_t de_n[ST_NBR_MODES];  /*  No-rewind entries  */
 
 	/* Status variables */
 	int partition;
@@ -110,6 +123,7 @@ typedef struct {
 	unsigned char autorew_dev;   /* auto-rewind device */
 	unsigned char rew_at_close;  /* rewind necessary at close */
 	unsigned char inited;
+	unsigned char cleaning_req;  /* cleaning requested? */
 	int block_size;
 	int min_block;
 	int max_block;
@@ -120,11 +134,19 @@ typedef struct {
 	unsigned char write_pending;
 	int nbr_finished;
 	int nbr_waits;
+	int nbr_requests;
+	int nbr_dio;
+	int nbr_pages;
+	int nbr_combinable;
 	unsigned char last_cmnd[6];
 	unsigned char last_sense[16];
 #endif
+	struct gendisk *disk;
 } Scsi_Tape;
 
+/* Bit masks for use_pf */
+#define USE_PF      1
+#define PF_TESTED   2
 
 /* Values of eof */
 #define	ST_NOEOF	0
@@ -137,6 +159,9 @@ typedef struct {
 #define ST_EOD		7
 /* EOD hit while reading => ST_EOD_1 => return zero => ST_EOD_2 =>
    return zero => ST_EOD, return ENOSPC */
+/* When writing: ST_EOM_OK == early warning found, write OK
+		 ST_EOD_1  == allow trying new write after early warning
+		 ST_EOM_ERROR == early warning found, not able to write all */
 
 /* Values of rw */
 #define	ST_IDLE		0
@@ -162,5 +187,7 @@ typedef struct {
 #define ST_DONT_TOUCH  0
 #define ST_NO          1
 #define ST_YES         2
+
+#define EXTENDED_SENSE_START  18
 
 #endif

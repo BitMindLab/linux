@@ -25,7 +25,7 @@
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
 #include <linux/pci.h>
@@ -35,9 +35,7 @@
 #include <asm/page.h>
 #include <linux/sched.h>
 #include <linux/video_decoder.h>
-#include <asm/segment.h>
 
-#include <linux/version.h>
 #include <asm/uaccess.h>
 
 #include "tuner.h"
@@ -57,11 +55,24 @@
 
 static unsigned int triton1=0;			/* triton1 chipset? */
 static unsigned int cardtype[ZORAN_MAX]={ [ 0 ... ZORAN_MAX-1 ] = CARDTYPE };
+static int video_nr = -1;
+static int vbi_nr = -1;
+
+static struct pci_device_id zr36120_pci_tbl[] = {
+	{ PCI_VENDOR_ID_ZORAN,PCI_DEVICE_ID_ZORAN_36120,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ 0 }
+};
+MODULE_DEVICE_TABLE(pci, zr36120_pci_tbl);
 
 MODULE_AUTHOR("Pauline Middelink <middelin@polyware.nl>");
 MODULE_DESCRIPTION("Zoran ZR36120 based framegrabber");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(triton1,"i");
 MODULE_PARM(cardtype,"1-" __MODULE_STRING(ZORAN_MAX) "i");
+MODULE_PARM(video_nr,"i");
+MODULE_PARM(vbi_nr,"i");
 
 static int zoran_cards;
 static struct zoran zorans[ZORAN_MAX];
@@ -74,7 +85,7 @@ static struct zoran zorans[ZORAN_MAX];
  * 0x28 and 0x2C. How you do that is left as an exercise
  * to the impatient reader :)
  */
-#define T 1	/* to seperate the bools from the ints */
+#define T 1	/* to separate the bools from the ints */
 #define F 0
 static struct tvcard tvcards[] = {
 	/* reported working by <middelin@polyware.nl> */
@@ -476,7 +487,7 @@ DEBUG(printk(KERN_DEBUG "       %d: clip(%d,%d,%d,%d)\n", i,vp->x,vp->y,vp->widt
 		    vcp->width < 0 || (uint)(vcp->x+vcp->width) > ztv->overinfo.w ||
 		    vcp->height < 0 || (vcp->y+vcp->height) > ztv->overinfo.h)
 		{
-			DEBUG(printk(CARD_DEBUG "illegal clipzone (%d,%d,%d,%d) not in (0,0,%d,%d), adapting\n",CARD,vcp->x,vcp->y,vcp->width,vcp->height,ztv->overinfo.w,ztv->overinfo.h));
+			DEBUG(printk(CARD_DEBUG "invalid clipzone (%d,%d,%d,%d) not in (0,0,%d,%d), adapting\n",CARD,vcp->x,vcp->y,vcp->width,vcp->height,ztv->overinfo.w,ztv->overinfo.h));
 			if (vcp->x < 0) vcp->x = 0;
 			if ((uint)vcp->x > ztv->overinfo.w) vcp->x = ztv->overinfo.w;
 			if (vcp->y < 0) vcp->y = 0;
@@ -788,7 +799,6 @@ static int zoran_open(struct video_device *dev, int flags)
 	/* do the common part of all open's */
 	zoran_common_open(ztv, flags);
 
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -820,7 +830,6 @@ void zoran_close(struct video_device* dev)
 		kfree( ztv->overinfo.overlay );
 	ztv->overinfo.overlay = 0;
 
-	MOD_DEC_USE_COUNT;
 }
 
 /*
@@ -933,7 +942,6 @@ long zoran_write(struct video_device* dev, const char* buf, unsigned long count,
 	return -EINVAL;
 }
 
-#if LINUX_VERSION_CODE >= 0x020100
 static
 unsigned int zoran_poll(struct video_device *dev, struct file *file, poll_table *wait)
 {
@@ -954,7 +962,6 @@ unsigned int zoran_poll(struct video_device *dev, struct file *file, poll_table 
 
 	return mask;
 }
-#endif
 
 /* append a new clipregion to the vector of video_clips */
 static
@@ -1023,7 +1030,7 @@ int zoran_ioctl(struct video_device* dev, unsigned int cmd, void *arg)
 		v.norm=VIDEO_MODE_PAL;
 #endif
 		/* too many inputs? no decoder -> no channels */
-		if (!ztv->have_decoder || v.channel >= ztv->card->video_inputs)
+		if (!ztv->have_decoder || v.channel < 0 ||  v.channel >= ztv->card->video_inputs)
 			return -EINVAL;
 
 		/* now determine the name of the channel */
@@ -1054,7 +1061,7 @@ int zoran_ioctl(struct video_device* dev, unsigned int cmd, void *arg)
 		DEBUG(printk(CARD_DEBUG "VIDIOCSCHAN(%d,%d)\n",CARD,v.channel,v.norm));
 
 		/* too many inputs? no decoder -> no channels */
-		if (!ztv->have_decoder || v.channel >= ztv->card->video_inputs)
+		if (!ztv->have_decoder || v.channel >= ztv->card->video_inputs || v.channel < 0)
 			return -EINVAL;
 
 		if (v.norm != VIDEO_MODE_PAL &&
@@ -1187,7 +1194,7 @@ int zoran_ioctl(struct video_device* dev, unsigned int cmd, void *arg)
 		if (vw.flags)
 			return -EINVAL;
 
-		if (vw.clipcount>256)
+		if (vw.clipcount <0 || vw.clipcount>256)
 			return -EDOM;   /* Too many! */
 
 		/*
@@ -1196,8 +1203,10 @@ int zoran_ioctl(struct video_device* dev, unsigned int cmd, void *arg)
 		vcp = vmalloc(sizeof(struct video_clip)*(vw.clipcount+4));
 		if (vcp==NULL)
 			return -ENOMEM;
-		if (vw.clipcount && copy_from_user(vcp,vw.clips,sizeof(struct video_clip)*vw.clipcount))
+		if (vw.clipcount && copy_from_user(vcp,vw.clips,sizeof(struct video_clip)*vw.clipcount)) {
+			vfree(vcp);
 			return -EFAULT;
+		}
 
 		on = ztv->running;
 		if (on)
@@ -1279,11 +1288,7 @@ int zoran_ioctl(struct video_device* dev, unsigned int cmd, void *arg)
 	 case VIDIOCSFBUF:
 	 {
 		struct video_buffer v;
-#if LINUX_VERSION_CODE >= 0x020100
-			if(!capable(CAP_SYS_ADMIN) && !capable(CAP_SYS_ADMIN))
-#else
-			if(!suser())
-#endif
+		if(!capable(CAP_SYS_ADMIN))
 			return -EPERM;
 		if (copy_from_user(&v, arg,sizeof(v)))
 			return -EFAULT;
@@ -1455,7 +1460,7 @@ int zoran_ioctl(struct video_device* dev, unsigned int cmd, void *arg)
 }
 
 static
-int zoran_mmap(struct video_device* dev, const char* adr, unsigned long size)
+int zoran_mmap(struct vm_area_struct *vma, struct video_device* dev, const char* adr, unsigned long size)
 {
 	struct zoran* ztv = (struct zoran*)dev;
 	unsigned long start = (unsigned long)adr;
@@ -1471,7 +1476,7 @@ int zoran_mmap(struct video_device* dev, const char* adr, unsigned long size)
 	pos = (unsigned long)ztv->fbuffer;
 	while (size>0) {
 		unsigned long page = virt_to_phys((void*)pos);
-		if (remap_page_range(start, page, PAGE_SIZE, PAGE_SHARED))
+		if (remap_page_range(vma, start, page, PAGE_SIZE, PAGE_SHARED))
 			return -EAGAIN;
 		start += PAGE_SIZE;
 		pos += PAGE_SIZE;
@@ -1482,17 +1487,18 @@ int zoran_mmap(struct video_device* dev, const char* adr, unsigned long size)
 
 static struct video_device zr36120_template=
 {
-	name:		"UNSET",
-	type:		VID_TYPE_TUNER|VID_TYPE_CAPTURE|VID_TYPE_OVERLAY,
-	hardware:	VID_HARDWARE_ZR36120,
-	open:		zoran_open,
-	close:		zoran_close,
-	read:		zoran_read,
-	write:		zoran_write,
-	poll:		zoran_poll,
-	ioctl:		zoran_ioctl,
-	mmap:		zoran_mmap,
-	minor:		-1,
+	.owner		= THIS_MODULE,
+	.name		= "UNSET",
+	.type		= VID_TYPE_TUNER|VID_TYPE_CAPTURE|VID_TYPE_OVERLAY,
+	.hardware	= VID_HARDWARE_ZR36120,
+	.open		= zoran_open,
+	.close		= zoran_close,
+	.read		= zoran_read,
+	.write		= zoran_write,
+	.poll		= zoran_poll,
+	.ioctl		= zoran_ioctl,
+	.mmap		= zoran_mmap,
+	.minor		= -1,
 };
 
 static
@@ -1541,7 +1547,6 @@ int vbi_open(struct video_device *dev, int flags)
 	/* start read-ahead */
 	zoran_cap(ztv, 1);
 
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -1573,7 +1578,6 @@ void vbi_close(struct video_device *dev)
 		item->memadr = 0;
 	}
 
-	MOD_DEC_USE_COUNT;
 }
 
 /*
@@ -1688,12 +1692,12 @@ long vbi_read(struct video_device* dev, char* buf, unsigned long count, int nonb
 			for (x=0; optr+1<eptr && x<-done->w; x++)
 			{
 				unsigned char a = iptr[x*2];
-				*optr++ = a;
-				*optr++ = a;
+				__put_user(a, optr++);
+				__put_user(a, optr++);
 			}
 			/* and clear the rest of the line */
 			for (x*=2; optr<eptr && x<done->bpl; x++)
-				*optr++ = 0;
+				__put_user(0, optr++);
 			/* next line */
 			iptr += done->bpl;
 		}
@@ -1710,10 +1714,10 @@ long vbi_read(struct video_device* dev, char* buf, unsigned long count, int nonb
 		{
 			/* copy to doubled data to userland */
 			for (x=0; optr<eptr && x<-done->w; x++)
-				*optr++ = iptr[x*2];
+				__put_user(iptr[x*2], optr++);
 			/* and clear the rest of the line */
 			for (;optr<eptr && x<done->bpl; x++)
-				*optr++ = 0;
+				__put_user(0, optr++);
 			/* next line */
 			iptr += done->bpl;
 		}
@@ -1722,7 +1726,7 @@ long vbi_read(struct video_device* dev, char* buf, unsigned long count, int nonb
 	/* API compliance:
 	 * place the framenumber (half fieldnr) in the last long
 	 */
-	((ulong*)eptr)[-1] = done->fieldnr/2;
+	__put_user(done->fieldnr/2, ((ulong*)eptr)[-1]);
 	}
 
 	/* keep the engine running */
@@ -1738,7 +1742,6 @@ out:
 	return count;
 }
 
-#if LINUX_VERSION_CODE >= 0x020100
 static
 unsigned int vbi_poll(struct video_device *dev, struct file *file, poll_table *wait)
 {
@@ -1759,7 +1762,6 @@ unsigned int vbi_poll(struct video_device *dev, struct file *file, poll_table *w
 
 	return mask;
 }
-#endif
 
 static
 int vbi_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
@@ -1819,16 +1821,17 @@ int vbi_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 
 static struct video_device vbi_template=
 {
-	name:		"UNSET",
-	type:		VID_TYPE_CAPTURE|VID_TYPE_TELETEXT,
-	hardware:	VID_HARDWARE_ZR36120,
-	open:		vbi_open,
-	close:		vbi_close,
-	read:		vbi_read,
-	write:		zoran_write,
-	poll:		vbi_poll,
-	ioctl:		vbi_ioctl,
-	minor:		-1,
+	.owner		= THIS_MODULE,
+	.name		= "UNSET",
+	.type		= VID_TYPE_CAPTURE|VID_TYPE_TELETEXT,
+	.hardware	= VID_HARDWARE_ZR36120,
+	.open		= vbi_open,
+	.close		= vbi_close,
+	.read		= vbi_read,
+	.write		= zoran_write,
+	.poll		= vbi_poll,
+	.ioctl		= vbi_ioctl,
+	.minor		= -1,
 };
 
 /*
@@ -1866,14 +1869,16 @@ int __init find_zoran(void)
 			SA_SHIRQ|SA_INTERRUPT,"zoran",(void *)ztv);
 		if (result==-EINVAL)
 		{
+			iounmap(ztv->zoran_mem);
 			printk(KERN_ERR "zoran: Bad irq number or handler\n");
 			return -EINVAL;
 		}
 		if (result==-EBUSY)
 			printk(KERN_ERR "zoran: IRQ %d busy, change your PnP config in BIOS\n",dev->irq);
-		if (result < 0)
+		if (result < 0) {
+			iounmap(ztv->zoran_mem);
 			return result;
-
+		}
 		/* Enable bus-mastering */
 		pci_set_master(dev);
 
@@ -1990,13 +1995,13 @@ int __init init_zoran(int card)
 	ztv->video_dev = zr36120_template;
 	strcpy(ztv->video_dev.name, ztv->i2c.name);
 	ztv->video_dev.priv = ztv;
-	if (video_register_device(&ztv->video_dev, VFL_TYPE_GRABBER) < 0)
+	if (video_register_device(&ztv->video_dev, VFL_TYPE_GRABBER, video_nr) < 0)
 		return -1;
 
 	ztv->vbi_dev = vbi_template;
 	strcpy(ztv->vbi_dev.name, ztv->i2c.name);
 	ztv->vbi_dev.priv = ztv;
-	if (video_register_device(&ztv->vbi_dev, VFL_TYPE_VBI) < 0) {
+	if (video_register_device(&ztv->vbi_dev, VFL_TYPE_VBI, vbi_nr) < 0) {
 		video_unregister_device(&ztv->video_dev);
 		return -1;
 	}
@@ -2010,7 +2015,7 @@ int __init init_zoran(int card)
 }
 
 static
-void __exit release_zoran(int max)
+void release_zoran(int max)
 {
 	struct zoran *ztv;
 	int i;

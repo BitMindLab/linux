@@ -1,5 +1,5 @@
-Read/Write HPFS 2.00
-1998-1999, Mikulas Patocka
+Read/Write HPFS 2.05
+1998-2001, Mikulas Patocka
 
 email: mikulas@artax.karlin.mff.cuni.cz
 homepage: http://artax.karlin.mff.cuni.cz/~mikulas/vyplody/hpfs/index-e.cgi
@@ -109,7 +109,7 @@ support is quite buggy. I have Czech OS/2 working in codepage 852 on my disk.
 Once I booted English OS/2 working in cp 850 and I created a file on my 852
 partition. It marked file name codepage as 850 - good. But when I again booted
 Czech OS/2, the file was completely inaccessible under any name. It seems that
-OS/2 uppercases the search pattern with it's system code page (852) and file
+OS/2 uppercases the search pattern with its system code page (852) and file
 name it's comparing to with its code page (850). These could never match. Is it
 really what IBM developers wanted? But problems continued. When I created in
 Czech OS/2 another file in that directory, that file was inaccessible too. OS/2
@@ -269,6 +269,20 @@ History
      Removed a lot of redundant code
 2.00 Fixed a bug in rename (it was there since 1.96)
      Better anti-fragmentation strategy
+2.01 Fixed problem with directory listing over NFS
+     Directory lseek now checks for proper parameters
+     Fixed race-condition in buffer code - it is in all filesystems in Linux;
+        when reading device (cat /dev/hda) while creating files on it, files
+        could be damaged
+2.02 Woraround for bug in breada in Linux. breada could cause accesses beyond
+        end of partition
+2.03 Char, block devices and pipes are correctly created
+     Fixed non-crashing race in unlink (Alexander Viro)
+     Now it works with Japanese version of OS/2
+2.04 Fixed error when ftruncate used to extend file
+2.05 Fixed crash when got mount parameters without =
+     Fixed crash when allocation of anode failed due to full disk
+     Fixed some crashes when block io or inode allocation failed
 
 
  vim: set textwidth=80:

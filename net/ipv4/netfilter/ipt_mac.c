@@ -6,21 +6,23 @@
 #include <linux/netfilter_ipv4/ipt_mac.h>
 #include <linux/netfilter_ipv4/ip_tables.h>
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+MODULE_DESCRIPTION("iptables mac matching module");
+
 static int
 match(const struct sk_buff *skb,
       const struct net_device *in,
       const struct net_device *out,
       const void *matchinfo,
       int offset,
-      const void *hdr,
-      u_int16_t datalen,
       int *hotdrop)
 {
     const struct ipt_mac_info *info = matchinfo;
 
     /* Is mac pointer valid? */
     return (skb->mac.raw >= skb->head
-	    && skb->mac.raw < skb->head + skb->len - ETH_HLEN
+	    && (skb->mac.raw + ETH_HLEN) <= skb->data
 	    /* If so, compare... */
 	    && ((memcmp(skb->mac.ethernet->h_source, info->srcaddr, ETH_ALEN)
 		== 0) ^ info->invert));
@@ -47,8 +49,12 @@ ipt_mac_checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ipt_match mac_match
-= { { NULL, NULL }, "mac", &match, &ipt_mac_checkentry, NULL, THIS_MODULE };
+static struct ipt_match mac_match = {
+	.name		= "mac",
+	.match		= &match,
+	.checkentry	= &ipt_mac_checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {

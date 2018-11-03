@@ -9,8 +9,8 @@
 
 #include <linux/config.h>
 #include <linux/types.h>
-#include <linux/sched.h>
-#include <linux/malloc.h>
+#include <linux/time.h>
+#include <linux/slab.h>
 #include <linux/in.h>
 #include <linux/sunrpc/svc.h>
 #include <linux/sunrpc/clnt.h>
@@ -29,17 +29,20 @@ static void	nlmsvc_callback_exit(struct rpc_task *);
 static u32
 cast_to_nlm(u32 status, u32 vers)
 {
-
+	/* Note: status is assumed to be in network byte order !!! */
 	if (vers != 4){
-		switch(ntohl(status)){
-		case NLM_LCK_GRANTED:
-		case NLM_LCK_DENIED:
-		case NLM_LCK_DENIED_NOLOCKS:
-		case NLM_LCK_BLOCKED:
-		case NLM_LCK_DENIED_GRACE_PERIOD:
+		switch (status) {
+		case nlm_granted:
+		case nlm_lck_denied:
+		case nlm_lck_denied_nolocks:
+		case nlm_lck_blocked:
+		case nlm_lck_denied_grace_period:
+			break;
+		case nlm4_deadlock:
+			status = nlm_lck_denied;
 			break;
 		default:
-			status = NLM_LCK_DENIED_NOLOCKS;
+			status = nlm_lck_denied_nolocks;
 		}
 	}
 
@@ -65,15 +68,6 @@ nlmsvc_retrieve_args(struct svc_rqst *rqstp, struct nlm_args *argp,
 	/* nfsd callbacks must have been installed for this procedure */
 	if (!nlmsvc_ops)
 		return nlm_lck_denied_nolocks;
-
-	/* Obtain handle for client host */
-	if (rqstp->rq_client == NULL) {
-		printk(KERN_NOTICE
-			"lockd: unauthenticated request from (%08x:%d)\n",
-			ntohl(rqstp->rq_addr.sin_addr.s_addr),
-			ntohs(rqstp->rq_addr.sin_port));
-		return nlm_lck_denied_nolocks;
-	}
 
 	/* Obtain host handle */
 	if (!(host = nlmsvc_lookup_host(rqstp))
@@ -278,6 +272,7 @@ nlmsvc_proc_test_msg(struct svc_rqst *rqstp, struct nlm_args *argp,
 	u32		stat;
 
 	dprintk("lockd: TEST_MSG      called\n");
+	memset(&res, 0, sizeof(res));
 
 	if ((stat = nlmsvc_proc_test(rqstp, argp, &res)) == 0)
 		stat = nlmsvc_callback(rqstp, NLMPROC_TEST_RES, &res);
@@ -292,6 +287,7 @@ nlmsvc_proc_lock_msg(struct svc_rqst *rqstp, struct nlm_args *argp,
 	u32		stat;
 
 	dprintk("lockd: LOCK_MSG      called\n");
+	memset(&res, 0, sizeof(res));
 
 	if ((stat = nlmsvc_proc_lock(rqstp, argp, &res)) == 0)
 		stat = nlmsvc_callback(rqstp, NLMPROC_LOCK_RES, &res);
@@ -306,6 +302,7 @@ nlmsvc_proc_cancel_msg(struct svc_rqst *rqstp, struct nlm_args *argp,
 	u32		stat;
 
 	dprintk("lockd: CANCEL_MSG    called\n");
+	memset(&res, 0, sizeof(res));
 
 	if ((stat = nlmsvc_proc_cancel(rqstp, argp, &res)) == 0)
 		stat = nlmsvc_callback(rqstp, NLMPROC_CANCEL_RES, &res);
@@ -320,6 +317,7 @@ nlmsvc_proc_unlock_msg(struct svc_rqst *rqstp, struct nlm_args *argp,
 	u32		stat;
 
 	dprintk("lockd: UNLOCK_MSG    called\n");
+	memset(&res, 0, sizeof(res));
 
 	if ((stat = nlmsvc_proc_unlock(rqstp, argp, &res)) == 0)
 		stat = nlmsvc_callback(rqstp, NLMPROC_UNLOCK_RES, &res);
@@ -334,6 +332,7 @@ nlmsvc_proc_granted_msg(struct svc_rqst *rqstp, struct nlm_args *argp,
 	u32		stat;
 
 	dprintk("lockd: GRANTED_MSG   called\n");
+	memset(&res, 0, sizeof(res));
 
 	if ((stat = nlmsvc_proc_granted(rqstp, argp, &res)) == 0)
 		stat = nlmsvc_callback(rqstp, NLMPROC_GRANTED_RES, &res);
@@ -445,6 +444,8 @@ nlmsvc_proc_sm_notify(struct svc_rqst *rqstp, struct nlm_reboot *argp,
 					      void	        *resp)
 {
 	struct sockaddr_in	saddr = rqstp->rq_addr;
+	int			vers = argp->vers;
+	int			prot = argp->proto >> 1;
 	struct nlm_host		*host;
 
 	dprintk("lockd: SM_NOTIFY     called\n");
@@ -460,21 +461,18 @@ nlmsvc_proc_sm_notify(struct svc_rqst *rqstp, struct nlm_reboot *argp,
 	/* Obtain the host pointer for this NFS server and try to
 	 * reclaim all locks we hold on this server.
 	 */
-	saddr.sin_addr.s_addr = argp->addr;	
-	if ((host = nlm_lookup_host(NULL, &saddr, IPPROTO_UDP, 1)) != NULL) {
-		nlmclnt_recovery(host, argp->state);
-		nlm_release_host(host);
-	}
-
-	/* If we run on an NFS server, delete all locks held by the client */
-	if (nlmsvc_ops != NULL) {
-		struct svc_client	*clnt;
-		saddr.sin_addr.s_addr = argp->addr;	
-		if ((clnt = nlmsvc_ops->exp_getclient(&saddr)) != NULL 
-		 && (host = nlm_lookup_host(clnt, &saddr, 0, 0)) != NULL) {
-			nlmsvc_free_host_resources(host);
+	saddr.sin_addr.s_addr = argp->addr;
+	if ((argp->proto & 1)==0) {
+		if ((host = nlmclnt_lookup_host(&saddr, prot, vers)) != NULL) {
+			nlmclnt_recovery(host, argp->state);
+			nlm_release_host(host);
 		}
-		nlm_release_host(host);
+	} else {
+		/* If we run on an NFS server, delete all locks held by the client */
+		if ((host = nlm_lookup_host(1, &saddr, prot, vers)) != NULL) {
+			nlmsvc_free_host_resources(host);
+			nlm_release_host(host);
+		}
 	}
 
 	return rpc_success;
@@ -547,42 +545,46 @@ nlmsvc_callback_exit(struct rpc_task *task)
 
 struct nlm_void			{ int dummy; };
 
-#define PROC(name, xargt, xrest, argt, rest)	\
- { (svc_procfunc) nlmsvc_proc_##name,	\
-   (kxdrproc_t) nlmsvc_decode_##xargt,	\
-   (kxdrproc_t) nlmsvc_encode_##xrest,	\
-   NULL,				\
-   sizeof(struct nlm_##argt),		\
-   sizeof(struct nlm_##rest),		\
-   0,					\
-   0					\
+#define PROC(name, xargt, xrest, argt, rest, respsize)	\
+ { .pc_func	= (svc_procfunc) nlmsvc_proc_##name,	\
+   .pc_decode	= (kxdrproc_t) nlmsvc_decode_##xargt,	\
+   .pc_encode	= (kxdrproc_t) nlmsvc_encode_##xrest,	\
+   .pc_release	= NULL,					\
+   .pc_argsize	= sizeof(struct nlm_##argt),		\
+   .pc_ressize	= sizeof(struct nlm_##rest),		\
+   .pc_xdrressize = respsize,				\
  }
-struct svc_procedure		nlmsvc_procedures[] = {
-  PROC(null,		void,		void,		void,	void),
-  PROC(test,		testargs,	testres,	args,	res),
-  PROC(lock,		lockargs,	res,		args,	res),
-  PROC(cancel,		cancargs,	res,		args,	res),
-  PROC(unlock,		unlockargs,	res,		args,	res),
-  PROC(granted,		testargs,	res,		args,	res),
-  PROC(test_msg,	testargs,	norep,		args,	void),
-  PROC(lock_msg,	lockargs,	norep,		args,	void),
-  PROC(cancel_msg,	cancargs,	norep,		args,	void),
-  PROC(unlock_msg,	unlockargs,	norep,		args,	void),
-  PROC(granted_msg,	testargs,	norep,		args,	void),
-  PROC(test_res,	testres,	norep,		res,	void),
-  PROC(lock_res,	lockres,	norep,		res,	void),
-  PROC(cancel_res,	cancelres,	norep,		res,	void),
-  PROC(unlock_res,	unlockres,	norep,		res,	void),
-  PROC(granted_res,	grantedres,	norep,		res,	void),
-  PROC(none,		void,		void,		void,	void),
-  PROC(none,		void,		void,		void,	void),
-  PROC(none,		void,		void,		void,	void),
-  PROC(none,		void,		void,		void,	void),
-  PROC(share,		shareargs,	shareres,	args,	res),
-  PROC(unshare,		shareargs,	shareres,	args,	res),
-  PROC(nm_lock,		lockargs,	res,		args,	res),
-  PROC(free_all,	notify,		void,		args,	void),
 
+#define	Ck	(1+8)	/* cookie */
+#define	St	1	/* status */
+#define	No	(1+1024/4) /* Net Obj */
+#define	Rg	2	/* range - offset + size */
+
+struct svc_procedure		nlmsvc_procedures[] = {
+  PROC(null,		void,		void,		void,	void, 1),
+  PROC(test,		testargs,	testres,	args,	res, Ck+St+2+No+Rg),
+  PROC(lock,		lockargs,	res,		args,	res, Ck+St),
+  PROC(cancel,		cancargs,	res,		args,	res, Ck+St),
+  PROC(unlock,		unlockargs,	res,		args,	res, Ck+St),
+  PROC(granted,		testargs,	res,		args,	res, Ck+St),
+  PROC(test_msg,	testargs,	norep,		args,	void, 1),
+  PROC(lock_msg,	lockargs,	norep,		args,	void, 1),
+  PROC(cancel_msg,	cancargs,	norep,		args,	void, 1),
+  PROC(unlock_msg,	unlockargs,	norep,		args,	void, 1),
+  PROC(granted_msg,	testargs,	norep,		args,	void, 1),
+  PROC(test_res,	testres,	norep,		res,	void, 1),
+  PROC(lock_res,	lockres,	norep,		res,	void, 1),
+  PROC(cancel_res,	cancelres,	norep,		res,	void, 1),
+  PROC(unlock_res,	unlockres,	norep,		res,	void, 1),
+  PROC(granted_res,	grantedres,	norep,		res,	void, 1),
   /* statd callback */
-  PROC(sm_notify,	reboot,		void,		reboot,	void),
+  PROC(sm_notify,	reboot,		void,		reboot,	void, 1),
+  PROC(none,		void,		void,		void,	void, 1),
+  PROC(none,		void,		void,		void,	void, 1),
+  PROC(none,		void,		void,		void,	void, 1),
+  PROC(share,		shareargs,	shareres,	args,	res, Ck+St+1),
+  PROC(unshare,		shareargs,	shareres,	args,	res, Ck+St+1),
+  PROC(nm_lock,		lockargs,	res,		args,	res, Ck+St),
+  PROC(free_all,	notify,		void,		args,	void, 0),
+
 };

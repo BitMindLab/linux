@@ -5,7 +5,7 @@
  *
  *		Dumb Network Address Translation.
  *
- * Version:	$Id: ip_nat_dumb.c,v 1.10 2000/10/24 22:54:26 davem Exp $
+ * Version:	$Id: ip_nat_dumb.c,v 1.11 2000/12/13 18:31:48 davem Exp $
  *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *
@@ -70,8 +70,14 @@ ip_do_nat(struct sk_buff *skb)
 			cksum  = (u16*)&((struct tcphdr*)(((char*)iph) + (iph->ihl<<2)))->check;
 			if ((u8*)(cksum+1) > skb->tail)
 				goto truncated;
-			check  = csum_tcpudp_magic(iph->saddr, iph->daddr, 0, 0, ~(*cksum));
-			*cksum = csum_tcpudp_magic(~osaddr, ~odaddr, 0, 0, ~check);
+			check = *cksum;
+			if (skb->ip_summed != CHECKSUM_HW)
+				check = ~check;
+			check = csum_tcpudp_magic(iph->saddr, iph->daddr, 0, 0, check);
+			check = csum_tcpudp_magic(~osaddr, ~odaddr, 0, 0, ~check);
+			if (skb->ip_summed == CHECKSUM_HW)
+				check = ~check;
+			*cksum = check;
 			break;
 		case IPPROTO_UDP:
 			cksum  = (u16*)&((struct udphdr*)(((char*)iph) + (iph->ihl<<2)))->check;
@@ -111,23 +117,23 @@ ip_do_nat(struct sk_buff *skb)
 			if (rt->rt_flags&RTCF_SNAT) {
 				if (ciph->daddr != osaddr) {
 					struct   fib_result res;
-					struct   rt_key key;
 					unsigned flags = 0;
-
-					key.src = ciph->daddr;
-					key.dst = ciph->saddr;
-					key.iif = skb->dev->ifindex;
-					key.oif = 0;
+					struct flowi fl = {
+						.iif = skb->dev->ifindex,
+						.nl_u =
+						{ .ip4_u =
+						  { .daddr = ciph->saddr,
+						    .saddr = ciph->daddr,
 #ifdef CONFIG_IP_ROUTE_TOS
-					key.tos = RT_TOS(ciph->tos);
+						    .tos = RT_TOS(ciph->tos)
 #endif
-#ifdef CONFIG_IP_ROUTE_FWMARK
-					key.fwmark = 0;
-#endif
+						  } },
+						.proto = ciph->protocol };
+
 					/* Use fib_lookup() until we get our own
 					 * hash table of NATed hosts -- Rani
 				 	 */
-					if (fib_lookup(&key, &res) == 0) {
+					if (fib_lookup(&fl, &res) == 0) {
 						if (res.r) {
 							ciph->daddr = fib_rules_policy(ciph->daddr, &res, &flags);
 							if (ciph->daddr != idaddr)

@@ -14,94 +14,98 @@
 
 #include <linux/config.h>
 #include <linux/threads.h>
-#include <asm/lowcore.h>
 #include <linux/sched.h>
+#include <linux/cache.h>
+#include <asm/lowcore.h>
 
-/* No irq_cpustat_t for s390, the data is held directly in S390_lowcore */
+/* irq_cpustat_t is unused currently, but could be converted
+ * into a percpu variable instead of storing softirq_pending
+ * on the lowcore */
+typedef struct {
+	unsigned int __softirq_pending;
+} irq_cpustat_t;
 
-/*
- * Simple wrappers reducing source bloat.  S390 specific because each
- * cpu stores its data in S390_lowcore (PSA) instead of using a cache
- * aligned array element like most architectures.
- */
+#define softirq_pending(cpu) (lowcore_ptr[(cpu)]->softirq_pending)
+#define local_softirq_pending() (S390_lowcore.softirq_pending)
 
-#ifdef CONFIG_SMP
-
-#define softirq_active(cpu)	(safe_get_cpu_lowcore(cpu).__softirq_active)
-#define softirq_mask(cpu)	(safe_get_cpu_lowcore(cpu).__softirq_mask)
-#define local_irq_count(cpu)	(safe_get_cpu_lowcore(cpu).__local_irq_count)
-#define local_bh_count(cpu)	(safe_get_cpu_lowcore(cpu).__local_bh_count)
-#define syscall_count(cpu)	(safe_get_cpu_lowcore(cpu).__syscall_count)
-
-#else	/* CONFIG_SMP */
-
-/* Optimize away the cpu calculation, it is always current PSA */
-#define softirq_active(cpu)	((void)(cpu), S390_lowcore.__softirq_active)
-#define softirq_mask(cpu)	((void)(cpu), S390_lowcore.__softirq_mask)
-#define local_irq_count(cpu)	((void)(cpu), S390_lowcore.__local_irq_count)
-#define local_bh_count(cpu)	((void)(cpu), S390_lowcore.__local_bh_count)
-#define syscall_count(cpu)	((void)(cpu), S390_lowcore.__syscall_count)
-
-#endif	/* CONFIG_SMP */
+#define __ARCH_IRQ_STAT
 
 /*
- * Are we in an interrupt context? Either doing bottom half
- * or hardware interrupt processing?
- * Special definitions for s390, always access current PSA.
+ * We put the hardirq and softirq counter into the preemption
+ * counter. The bitmask has the following meaning:
+ *
+ * - bits 0-7 are the preemption count (max preemption depth: 256)
+ * - bits 8-15 are the softirq count (max # of softirqs: 256)
+ * - bits 16-23 are the hardirq count (max # of hardirqs: 256)
+ *
+ * - ( bit 26 is the PREEMPT_ACTIVE flag. )
+ *
+ * PREEMPT_MASK: 0x000000ff
+ * SOFTIRQ_MASK: 0x0000ff00
+ * HARDIRQ_MASK: 0x00010000
  */
-#define in_interrupt() ((S390_lowcore.__local_irq_count + S390_lowcore.__local_bh_count) != 0)
 
-#define in_irq() (S390_lowcore.__local_irq_count != 0)
+#define PREEMPT_BITS	8
+#define SOFTIRQ_BITS	8
+#define HARDIRQ_BITS	1
 
-#ifndef CONFIG_SMP
+#define PREEMPT_SHIFT	0
+#define SOFTIRQ_SHIFT	(PREEMPT_SHIFT + PREEMPT_BITS)
+#define HARDIRQ_SHIFT	(SOFTIRQ_SHIFT + SOFTIRQ_BITS)
 
-#define hardirq_trylock(cpu)	(local_irq_count(cpu) == 0)
-#define hardirq_endlock(cpu)	do { } while (0)
+#define __MASK(x)	((1UL << (x))-1)
 
-#define hardirq_enter(cpu)	(local_irq_count(cpu)++)
-#define hardirq_exit(cpu)	(local_irq_count(cpu)--)
+#define PREEMPT_MASK	(__MASK(PREEMPT_BITS) << PREEMPT_SHIFT)
+#define SOFTIRQ_MASK	(__MASK(SOFTIRQ_BITS) << SOFTIRQ_SHIFT)
+#define HARDIRQ_MASK	(__MASK(HARDIRQ_BITS) << HARDIRQ_SHIFT)
 
-#define synchronize_irq()	do { } while (0)
+#define hardirq_count()	(preempt_count() & HARDIRQ_MASK)
+#define softirq_count()	(preempt_count() & SOFTIRQ_MASK)
+#define irq_count()	(preempt_count() & (HARDIRQ_MASK | SOFTIRQ_MASK))
 
+#define PREEMPT_OFFSET	(1UL << PREEMPT_SHIFT)
+#define SOFTIRQ_OFFSET	(1UL << SOFTIRQ_SHIFT)
+#define HARDIRQ_OFFSET	(1UL << HARDIRQ_SHIFT)
+
+/*
+ * Are we doing bottom half or hardware interrupt processing?
+ * Are we in a softirq context? Interrupt context?
+ */
+#define in_irq()		(hardirq_count())
+#define in_softirq()		(softirq_count())
+#define in_interrupt()		(irq_count())
+
+
+#define hardirq_trylock()	(!in_interrupt())
+#define hardirq_endlock()	do { } while (0)
+
+#define irq_enter()							\
+do {									\
+	BUG_ON( hardirq_count() );					\
+	(preempt_count() += HARDIRQ_OFFSET);				\
+} while(0)
+	
+
+extern void do_call_softirq(void);
+extern void account_ticks(struct pt_regs *);
+
+#define invoke_softirq() do_call_softirq()
+
+#ifdef CONFIG_PREEMPT
+# define in_atomic()	((preempt_count() & ~PREEMPT_ACTIVE) != kernel_locked())
+# define IRQ_EXIT_OFFSET (HARDIRQ_OFFSET-1)
 #else
+# define in_atomic()	(preempt_count() != 0)
+# define IRQ_EXIT_OFFSET HARDIRQ_OFFSET
+#endif
 
-#include <asm/atomic.h>
-#include <asm/smp.h>
-
-extern atomic_t global_irq_holder;
-extern atomic_t global_irq_lock;
-extern atomic_t global_irq_count;
-
-static inline void release_irqlock(int cpu)
-{
-	/* if we didn't own the irq lock, just ignore.. */
-	if (atomic_read(&global_irq_holder) ==  cpu) {
-		atomic_set(&global_irq_holder,NO_PROC_ID);
-		clear_bit(0,&global_irq_lock);
-	}
-}
-
-static inline void hardirq_enter(int cpu)
-{
-        ++local_irq_count(cpu);
-	atomic_inc(&global_irq_count);
-}
-
-static inline void hardirq_exit(int cpu)
-{
-	atomic_dec(&global_irq_count);
-        --local_irq_count(cpu);
-}
-
-static inline int hardirq_trylock(int cpu)
-{
-	return !atomic_read(&global_irq_count) && !test_bit(0,&global_irq_lock);
-}
-
-#define hardirq_endlock(cpu)	do { } while (0)
-
-extern void synchronize_irq(void);
-
-#endif /* CONFIG_SMP */
+#define irq_exit()							\
+do {									\
+	preempt_count() -= IRQ_EXIT_OFFSET;				\
+	if (!in_interrupt() && local_softirq_pending())			\
+		/* Use the async. stack for softirq */			\
+		do_call_softirq();					\
+	preempt_enable_no_resched();					\
+} while (0)
 
 #endif /* __ASM_HARDIRQ_H */

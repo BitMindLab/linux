@@ -6,11 +6,10 @@
     Director, National Security Agency.
 
     This software may be used and distributed according to the terms
-    of the GNU Public License, incorporated herein by reference.
+    of the GNU General Public License, incorporated herein by reference.
 
-    The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-    Center of Excellence in Space Data and Information Sciences
-        Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+    The author may be reached as becker@scyld.com, or C/O
+    Scyld Computing Corporation, 410 Severn Ave., Suite 210, Annapolis MD 21403
 
     This driver should work with many programmed-I/O 8390-based ethernet
     boards.  Currently it supports the NE1000, NE2000, many clones,
@@ -43,16 +42,17 @@ static const char version2[] =
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/isapnp.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/delay.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+
 #include <asm/system.h>
 #include <asm/io.h>
 
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
 #include "8390.h"
 
 /* Some defines that people can play with if so inclined. */
@@ -76,12 +76,20 @@ static unsigned int netcard_portlist[] __initdata = {
 };
 #endif
 
-static struct { unsigned short vendor, function; char *name; }
-isapnp_clone_list[] __initdata = {
-	{ISAPNP_VENDOR('E','D','I'), ISAPNP_FUNCTION(0x0216),		"NN NE2000" },
-	{ISAPNP_VENDOR('P','N','P'), ISAPNP_FUNCTION(0x80d6),		"Generic PNP" },
-	{0,}
+static struct isapnp_device_id isapnp_clone_list[] __initdata = {
+	{	ISAPNP_CARD_ID('A','X','E',0x2011),
+		ISAPNP_VENDOR('A','X','E'), ISAPNP_FUNCTION(0x2011),
+		(long) "NetGear EA201" },
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('E','D','I'), ISAPNP_FUNCTION(0x0216),
+		(long) "NN NE2000" },
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('P','N','P'), ISAPNP_FUNCTION(0x80d6),
+		(long) "Generic PNP" },
+	{ }	/* terminate list */
 };
+
+MODULE_DEVICE_TABLE(isapnp, isapnp_clone_list);
 
 #ifdef SUPPORT_NE_BAD_CLONES
 /* A list of bad clones that we none-the-less recognize. */
@@ -188,29 +196,33 @@ static int __init ne_probe_isapnp(struct net_device *dev)
 	int i;
 
 	for (i = 0; isapnp_clone_list[i].vendor != 0; i++) {
-		struct pci_dev *idev = NULL;
+		struct pnp_dev *idev = NULL;
 
-		while ((idev = isapnp_find_dev(NULL,
-					       isapnp_clone_list[i].vendor,
-					       isapnp_clone_list[i].function,
-					       idev))) {
+		while ((idev = pnp_find_dev(NULL,
+					    isapnp_clone_list[i].vendor,
+					    isapnp_clone_list[i].function,
+					    idev))) {
 			/* Avoid already found cards from previous calls */
-			if (idev->prepare(idev))
+			if (pnp_device_attach(idev) < 0)
 				continue;
-			if (idev->activate(idev))
+			if (pnp_activate_dev(idev) < 0) {
+			      	pnp_device_detach(idev);
+			      	continue;
+			}
+			/* if no io and irq, search for next */
+			if (!pnp_port_valid(idev, 0) || !pnp_irq_valid(idev, 0)) {
+				pnp_device_detach(idev);
 				continue;
-			/* if no irq, search for next */
-			if (idev->irq_resource[0].start == 0)
-				continue;
+			}
 			/* found it */
-			dev->base_addr = idev->resource[0].start;
-			dev->irq = idev->irq_resource[0].start;
+			dev->base_addr = pnp_port_start(idev, 0);
+			dev->irq = pnp_irq(idev, 0);
 			printk(KERN_INFO "ne.c: ISAPnP reports %s at i/o %#lx, irq %d.\n",
-				isapnp_clone_list[i].name,
-
+				(char *) isapnp_clone_list[i].driver_data,
 				dev->base_addr, dev->irq);
 			if (ne_probe1(dev, dev->base_addr) != 0) {	/* Shouldn't happen. */
 				printk(KERN_ERR "ne.c: Probe of ISAPnP card at %#lx failed.\n", dev->base_addr);
+				pnp_device_detach(idev);
 				return -ENXIO;
 			}
 			ei_status.priv = (unsigned long)idev;
@@ -233,7 +245,7 @@ static int __init ne_probe1(struct net_device *dev, int ioaddr)
 	int start_page, stop_page;
 	int neX000, ctron, copam, bad_card;
 	int reg0, ret;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 
 	if (!request_region(ioaddr, NE_IO_EXTENT, dev->name))
 		return -EBUSY;
@@ -730,6 +742,11 @@ static int bad[MAX_NE_CARDS];	/* 0xbad = bad sig or no reset ack */
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
 MODULE_PARM(bad, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
+MODULE_PARM_DESC(io, "I/O base address(es),required");
+MODULE_PARM_DESC(irq, "IRQ number(s)");
+MODULE_PARM_DESC(bad, "Accept card(s) with bad signatures");
+MODULE_DESCRIPTION("NE1000/NE2000 ISA/PnP Ethernet driver");
+MODULE_LICENSE("GPL");
 
 /* This is set up so that no ISA autoprobe takes place. We can't guarantee
 that the ne2k probe is the last 8390 based probe to take place (as it
@@ -770,9 +787,9 @@ void cleanup_module(void)
 		struct net_device *dev = &dev_ne[this_dev];
 		if (dev->priv != NULL) {
 			void *priv = dev->priv;
-			struct pci_dev *idev = (struct pci_dev *)ei_status.priv;
+			struct pnp_dev *idev = (struct pnp_dev *)ei_status.priv;
 			if (idev)
-				idev->deactivate(idev);
+				pnp_device_detach(idev);
 			free_irq(dev->irq, dev);
 			release_region(dev->base_addr, NE_IO_EXTENT);
 			unregister_netdev(dev);
@@ -781,11 +798,3 @@ void cleanup_module(void)
 	}
 }
 #endif /* MODULE */
-
-/*
- * Local variables:
- *  compile-command: "gcc -DKERNEL -Wall -O6 -fomit-frame-pointer -I/usr/src/linux/net/tcp -c ne.c"
- *  version-control: t
- *  kept-new-versions: 5
- * End:
- */

@@ -23,12 +23,13 @@
 #include <linux/signal.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
-#include <linux/types.h>
+#include <linux/module.h>
 #include <linux/a.out.h>
 #include <linux/user.h>
 #include <linux/string.h>
 #include <linux/linkage.h>
 #include <linux/init.h>
+#include <linux/ptrace.h>
 
 #include <asm/setup.h>
 #include <asm/fpu.h>
@@ -64,7 +65,7 @@ e_vector vectors[256] = {
 /* nmi handler for the Amiga */
 asm(".text\n"
     __ALIGN_STR "\n"
-    SYMBOL_NAME_STR(nmihandler) ": rte");
+    "nmihandler: rte");
 
 /*
  * this must be called very early as the kernel might
@@ -72,6 +73,12 @@ asm(".text\n"
  */
 void __init base_trap_init(void)
 {
+	if(MACH_IS_SUN3X) {
+		extern e_vector *sun3x_prom_vbr;
+
+		__asm__ volatile ("movec %%vbr, %0" : "=r" ((void*)sun3x_prom_vbr));
+	}
+	
 	/* setup the exception vector table */
 	__asm__ volatile ("movec %0,%%vbr" : : "r" ((void*)vectors));
 
@@ -218,7 +225,7 @@ static inline void access_error060 (struct frame *fp)
 		unsigned long addr = fp->un.fmt4.effaddr;
 
 		if (fslw & MMU060_MA)
-			addr = (addr + 7) & -8;
+			addr = (addr + PAGE_SIZE - 1) & PAGE_MASK;
 
 		errorcode = 1;
 		if (fslw & MMU060_DESC_ERR) {
@@ -245,20 +252,21 @@ static inline void access_error060 (struct frame *fp)
 #endif /* CONFIG_M68060 */
 
 #if defined (CONFIG_M68040)
-static inline unsigned long probe040(int iswrite, unsigned long addr)
+static inline unsigned long probe040(int iswrite, unsigned long addr, int wbs)
 {
 	unsigned long mmusr;
+	mm_segment_t old_fs = get_fs();
 
-	asm volatile (".chip 68040");
+	set_fs(MAKE_MM_SEG(wbs));
 
 	if (iswrite)
-		asm volatile ("ptestw (%0)" : : "a" (addr));
+		asm volatile (".chip 68040; ptestw (%0); .chip 68k" : : "a" (addr));
 	else
-		asm volatile ("ptestr (%0)" : : "a" (addr));
+		asm volatile (".chip 68040; ptestr (%0); .chip 68k" : : "a" (addr));
 
-	asm volatile ("movec %%mmusr,%0" : "=r" (mmusr));
+	asm volatile (".chip 68040; movec %%mmusr,%0; .chip 68k" : "=r" (mmusr));
 
-	asm volatile (".chip 68k");
+	set_fs(old_fs); 
 
 	return mmusr;
 }
@@ -267,7 +275,9 @@ static inline int do_040writeback1(unsigned short wbs, unsigned long wba,
 				   unsigned long wbd)
 {
 	int res = 0;
+	mm_segment_t old_fs = get_fs();
 
+	/* set_fs can not be moved, otherwise put_user() may oops */
 	set_fs(MAKE_MM_SEG(wbs));
 
 	switch (wbs & WBSIZ_040) {
@@ -282,6 +292,10 @@ static inline int do_040writeback1(unsigned short wbs, unsigned long wba,
 		break;
 	}
 
+	/* set_fs can not be moved, otherwise put_user() may oops */
+	set_fs(old_fs); 
+	
+
 #ifdef DEBUG
 	printk("do_040writeback1, res=%d\n",res);
 #endif
@@ -289,14 +303,16 @@ static inline int do_040writeback1(unsigned short wbs, unsigned long wba,
 	return res;
 }
 
-/* after an exception in a writeback the stack frame coresponding
+/* after an exception in a writeback the stack frame corresponding
  * to that exception is discarded, set a few bits in the old frame 
  * to simulate what it should look like
  */
-static inline void fix_xframe040(struct frame *fp, unsigned short wbs)
+static inline void fix_xframe040(struct frame *fp, unsigned long wba, unsigned short wbs)
 {
-	fp->un.fmt7.faddr = current->thread.faddr;
+	fp->un.fmt7.faddr = wba;
 	fp->un.fmt7.ssw = wbs & 0xff;
+	if (wba != current->thread.faddr)
+	    fp->un.fmt7.ssw |= MA_040;
 }
 
 static inline void do_040writebacks(struct frame *fp)
@@ -312,17 +328,24 @@ static inline void do_040writebacks(struct frame *fp)
 		res = do_040writeback1(fp->un.fmt7.wb2s, fp->un.fmt7.wb2a,
 				       fp->un.fmt7.wb2d);
 		if (res)
-			fix_xframe040(fp, fp->un.fmt7.wb2s);
+			fix_xframe040(fp, fp->un.fmt7.wb2a, fp->un.fmt7.wb2s);
 		else 
 			fp->un.fmt7.wb2s = 0;
 	}
 
-	/* do the 2nd wb only if the first one was succesful (except for a kernel wb) */
+	/* do the 2nd wb only if the first one was successful (except for a kernel wb) */
 	if (fp->un.fmt7.wb3s & WBV_040 && (!res || fp->un.fmt7.wb3s & 4)) {
 		res = do_040writeback1(fp->un.fmt7.wb3s, fp->un.fmt7.wb3a,
 				       fp->un.fmt7.wb3d);
 		if (res)
-			fix_xframe040(fp, fp->un.fmt7.wb3s);
+		    {
+			fix_xframe040(fp, fp->un.fmt7.wb3a, fp->un.fmt7.wb3s);
+
+			fp->un.fmt7.wb2s = fp->un.fmt7.wb3s;
+			fp->un.fmt7.wb3s &= (~WBV_040);
+			fp->un.fmt7.wb2a = fp->un.fmt7.wb3a;
+			fp->un.fmt7.wb2d = fp->un.fmt7.wb3d;
+		    }
 		else
 			fp->un.fmt7.wb3s = 0;
 	}
@@ -339,19 +362,15 @@ static inline void do_040writebacks(struct frame *fp)
  */
 asmlinkage void berr_040cleanup(struct frame *fp)
 {
-	mm_segment_t old_fs = get_fs();
-
 	fp->un.fmt7.wb2s &= ~4;
 	fp->un.fmt7.wb3s &= ~4;
 
 	do_040writebacks(fp);
-	set_fs(old_fs);
 }
 
 static inline void access_error040(struct frame *fp)
 {
 	unsigned short ssw = fp->un.fmt7.ssw;
-	mm_segment_t old_fs = get_fs();
 	unsigned long mmusr;
 
 #ifdef DEBUG
@@ -374,9 +393,8 @@ static inline void access_error040(struct frame *fp)
 		if (ssw & MA_040)
 			addr = (addr + 7) & -8;
 
-		set_fs(MAKE_MM_SEG(ssw));
 		/* MMU error, get the MMUSR info for this access */
-		mmusr = probe040(!(ssw & RW_040), addr);
+		mmusr = probe040(!(ssw & RW_040), addr, ssw);
 #ifdef DEBUG
 		printk("mmusr = %lx\n", mmusr);
 #endif
@@ -386,8 +404,12 @@ static inline void access_error040(struct frame *fp)
 			__flush_tlb040_one(addr);
 			errorcode = 0;
 		}
-		if (!(ssw & RW_040))
+
+		/* despite what documentation seems to say, RMW 
+		 * accesses have always both the LK and RW bits set */
+		if (!(ssw & RW_040) || (ssw & LK_040))
 			errorcode |= 2;
+
 		if (do_page_fault(&fp->ptregs, addr, errorcode)) {
 #ifdef DEBUG
 		        printk("do_page_fault() !=0 \n");
@@ -415,7 +437,6 @@ static inline void access_error040(struct frame *fp)
 	}
 
 	do_040writebacks(fp);
-	set_fs(old_fs);
 }
 #endif /* CONFIG_M68040 */
 
@@ -431,6 +452,7 @@ extern inline void bus_error030 (struct frame *fp)
 	unsigned char buserr_type = sun3_get_buserr ();
 	unsigned long addr, errorcode;
 	unsigned short ssw = fp->un.fmtb.ssw;
+	extern unsigned long _sun3_map_test_start, _sun3_map_test_end;
 
 #if DEBUG
 	if (ssw & (FC | FB))
@@ -470,6 +492,13 @@ extern inline void bus_error030 (struct frame *fp)
 				printk ("Instruction fault at %#010lx\n",
 					fp->ptregs.pc);
 			if (ssw & DF) {
+				/* was this fault incurred testing bus mappings? */
+				if((fp->ptregs.pc >= (unsigned long)&_sun3_map_test_start) &&
+				   (fp->ptregs.pc <= (unsigned long)&_sun3_map_test_end)) {
+					send_fault_sig(&fp->ptregs);
+					return;
+				}
+
 				printk ("Data %s fault at %#010lx in %s (pc=%#lx)\n",
 					ssw & RW ? "read" : "write",
 					fp->un.fmtb.daddr,
@@ -791,16 +820,42 @@ asmlinkage void buserr_c(struct frame *fp)
 }
 
 
-int kstack_depth_to_print = 48;
+static int kstack_depth_to_print = 48;
 
-/* MODULE_RANGE is a guess of how much space is likely to be
-   vmalloced.  */
-#define MODULE_RANGE (8*1024*1024)
-
-static void dump_stack(struct frame *fp)
+void show_trace(unsigned long *stack)
 {
-	unsigned long *stack, *endstack, addr, module_start, module_end;
-	extern char _start, _etext;
+	unsigned long *endstack;
+	unsigned long addr;
+	int i;
+
+	printk("Call Trace:");
+	addr = (unsigned long)stack + THREAD_SIZE - 1;
+	endstack = (unsigned long *)(addr & -THREAD_SIZE);
+	i = 0;
+	while (stack + 1 <= endstack) {
+		addr = *stack++;
+		/*
+		 * If the address is either in the text segment of the
+		 * kernel, or in the region which contains vmalloc'ed
+		 * memory, it *may* be the address of a calling
+		 * routine; if so, print it so that someone tracing
+		 * down the cause of the crash will be able to figure
+		 * out the call path that was taken.
+		 */
+		if (kernel_text_address(addr)) {
+			if (i % 4 == 0)
+				printk("\n       ");
+			printk(" [<%08lx>]", addr);
+			i++;
+		}
+	}
+	printk("\n");
+}
+
+void show_registers(struct pt_regs *regs)
+{
+	struct frame *fp = (struct frame *)regs;
+	unsigned long addr;
 	int i;
 
 	addr = (unsigned long)&fp->un;
@@ -855,9 +910,26 @@ static void dump_stack(struct frame *fp)
 	default:
 	    printk("\n");
 	}
+	show_stack(NULL, (unsigned long *)addr);
 
-	stack = (unsigned long *)addr;
-	endstack = (unsigned long *)PAGE_ALIGN(addr);
+	printk("Code: ");
+	for (i = 0; i < 10; i++)
+		printk("%04x ", 0xffff & ((short *) fp->ptregs.pc)[i]);
+	printk ("\n");
+}
+
+extern void show_stack(struct task_struct *task, unsigned long *stack)
+{
+	unsigned long *endstack;
+	int i;
+
+	if (!stack) {
+		if (task)
+			stack = (unsigned long *)task->thread.esp0;
+		else
+			stack = (unsigned long *)&stack;
+	}
+	endstack = (unsigned long *)(((unsigned long)stack + THREAD_SIZE - 1) & -THREAD_SIZE);
 
 	printk("Stack from %08lx:", (unsigned long)stack);
 	for (i = 0; i < kstack_depth_to_print; i++) {
@@ -867,36 +939,21 @@ static void dump_stack(struct frame *fp)
 			printk("\n       ");
 		printk(" %08lx", *stack++);
 	}
-
-	printk ("\nCall Trace:");
-	stack = (unsigned long *) addr;
-	i = 0;
-	module_start = VMALLOC_START;
-	module_end = module_start + MODULE_RANGE;
-	while (stack + 1 <= endstack) {
-		addr = *stack++;
-		/*
-		 * If the address is either in the text segment of the
-		 * kernel, or in the region which contains vmalloc'ed
-		 * memory, it *may* be the address of a calling
-		 * routine; if so, print it so that someone tracing
-		 * down the cause of the crash will be able to figure
-		 * out the call path that was taken.
-		 */
-		if (((addr >= (unsigned long) &_start) &&
-		     (addr <= (unsigned long) &_etext)) ||
-		    ((addr >= module_start) && (addr <= module_end))) {
-			if (i % 4 == 0)
-				printk("\n       ");
-			printk(" [<%08lx>]", addr);
-			i++;
-		}
-	}
-	printk("\nCode: ");
-	for (i = 0; i < 10; i++)
-		printk("%04x ", 0xffff & ((short *) fp->ptregs.pc)[i]);
-	printk ("\n");
+	printk("\n");
+	show_trace(stack);
 }
+
+/*
+ * The architecture-independent backtrace generator
+ */
+void dump_stack(void)
+{
+	unsigned long stack;
+
+	show_trace(&stack);
+}
+
+EXPORT_SYMBOL(dump_stack);
 
 void bad_super_trap (struct frame *fp)
 {
@@ -1068,7 +1125,7 @@ void die_if_kernel (char *str, struct pt_regs *fp, int nr)
 
 	printk("Process %s (pid: %d, stackpage=%08lx)\n",
 		current->comm, current->pid, PAGE_SIZE+(unsigned long)current);
-	dump_stack((struct frame *)fp);
+	show_stack(NULL, (unsigned long *)fp);
 	do_exit(SIGSEGV);
 }
 

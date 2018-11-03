@@ -1,22 +1,11 @@
-/*
- *  $Id: timer.c,v 1.3 2000/05/06 00:52:39 kai Exp $
- *  Copyright (C) 1996  SpellCaster Telecommunications Inc.
+/* $Id: timer.c,v 1.3.6.1 2001/09/23 22:24:59 kai Exp $
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
+ * Copyright (C) 1996  SpellCaster Telecommunications Inc.
  *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- *  For more information, please contact gpl-info@spellcast.com or write:
+ * For more information, please contact gpl-info@spellcast.com or write:
  *
  *     SpellCaster Telecommunications Inc.
  *     5621 Finch Avenue East, Unit #3
@@ -26,7 +15,6 @@
  *     +1 (416) 297-6433 Facsimile
  */
 
-#define __NO_VERSION__
 #include "includes.h"
 #include "hardware.h"
 #include "message.h"
@@ -74,8 +62,7 @@ void check_reset(unsigned long data)
 	/* Setup the io ports */
 	setup_ports(card);
 
-  	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&adapter[card]->lock, flags);
 	outb(adapter[card]->ioport[adapter[card]->shmem_pgport],
 		(adapter[card]->shmem_magic>>14) | 0x80);	
 	sig = (unsigned long) *((unsigned long *)(adapter[card]->rambase + SIG_OFFSET));	
@@ -83,18 +70,16 @@ void check_reset(unsigned long data)
 	/* check the signature */
 	if(sig == SIGNATURE) {
 		flushreadfifo(card);
-		restore_flags(flags);
+		spin_unlock_irqrestore(&adapter[card]->lock, flags);
 		/* See if we need to do a startproc */
 		if (adapter[card]->StartOnReset)
 			startproc(card);
-	}
-	else  {
+	} else  {
 		pr_debug("%s: No signature yet, waiting another %d jiffies.\n", 
 			adapter[card]->devicename, CHECKRESET_TIME);
 		mod_timer(&adapter[card]->reset_timer, jiffies+CHECKRESET_TIME);
+		spin_unlock_irqrestore(&adapter[card]->lock, flags);
 	}
-	restore_flags(flags);
-		
 }
 
 /*
@@ -134,10 +119,9 @@ void check_phystat(unsigned long data)
 	adapter[card]->phystat = adapter[card]->nphystat;
 
 	/* Reinitialize the timer */
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&adapter[card]->lock, flags);
 	mod_timer(&adapter[card]->stat_timer, jiffies+CHECKSTAT_TIME);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&adapter[card]->lock, flags);
 
 	/* Send a new cePhyStatus message */
 	sendmessage(card, CEPID,ceReqTypePhy,ceReqClass2,
@@ -158,11 +142,5 @@ void check_phystat(unsigned long data)
  */
 void trace_timer(unsigned long data)
 {
-	unsigned long flags;
-
-	/*
-	 * Disable interrupts and swap the first page
-	 */
-	save_flags(flags);
-	cli();
+	/* not implemented */
 }

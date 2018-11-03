@@ -112,11 +112,6 @@ static int u32_classify(struct sk_buff *skb, struct tcf_proto *tp, struct tcf_re
 	int sel = 0;
 	int i;
 
-#if !defined(__i386__) && !defined(__mc68000__)
-	if ((unsigned long)ptr & 3)
-		return -1;
-#endif
-
 next_ht:
 	n = ht->ht[sel];
 
@@ -162,7 +157,7 @@ check_terminal:
 		if (!(n->sel.flags&(TC_U32_VAROFFSET|TC_U32_OFFSET|TC_U32_EAT)))
 			goto next_ht;
 
-		if (n->sel.flags&(TC_U32_EAT|TC_U32_VAROFFSET)) {
+		if (n->sel.flags&(TC_U32_OFFSET|TC_U32_VAROFFSET)) {
 			off2 = n->sel.off + 3;
 			if (n->sel.flags&TC_U32_VAROFFSET)
 				off2 += ntohs(n->sel.offmask & *(u16*)(ptr+n->sel.offoff)) >>n->sel.offshift;
@@ -208,17 +203,17 @@ static __inline__ struct tc_u_knode *
 u32_lookup_key(struct tc_u_hnode *ht, u32 handle)
 {
 	unsigned sel;
-	struct tc_u_knode *n;
+	struct tc_u_knode *n = NULL;
 
 	sel = TC_U32_HASH(handle);
 	if (sel > ht->divisor)
-		return 0;
+		goto out;
 
 	for (n = ht->ht[sel]; n; n = n->next)
 		if (n->handle == handle)
-			return n;
-
-	return NULL;
+			break;
+out:
+	return n;
 }
 
 
@@ -252,7 +247,7 @@ static u32 gen_new_htid(struct tc_u_common *tp_c)
 	do {
 		if (++tp_c->hgenerator == 0x7FF)
 			tp_c->hgenerator = 1;
-	} while (i>0 && u32_lookup_ht(tp_c, (tp_c->hgenerator|0x800)<<20));
+	} while (--i>0 && u32_lookup_ht(tp_c, (tp_c->hgenerator|0x800)<<20));
 
 	return i > 0 ? (tp_c->hgenerator|0x800)<<20 : 0;
 }
@@ -262,17 +257,14 @@ static int u32_init(struct tcf_proto *tp)
 	struct tc_u_hnode *root_ht;
 	struct tc_u_common *tp_c;
 
-	MOD_INC_USE_COUNT;
-
 	for (tp_c = u32_list; tp_c; tp_c = tp_c->next)
 		if (tp_c->q == tp->q)
 			break;
 
 	root_ht = kmalloc(sizeof(*root_ht), GFP_KERNEL);
-	if (root_ht == NULL) {
-		MOD_DEC_USE_COUNT;
+	if (root_ht == NULL)
 		return -ENOBUFS;
-	}
+
 	memset(root_ht, 0, sizeof(*root_ht));
 	root_ht->divisor = 0;
 	root_ht->refcnt++;
@@ -282,7 +274,6 @@ static int u32_init(struct tcf_proto *tp)
 		tp_c = kmalloc(sizeof(*tp_c), GFP_KERNEL);
 		if (tp_c == NULL) {
 			kfree(root_ht);
-			MOD_DEC_USE_COUNT;
 			return -ENOBUFS;
 		}
 		memset(tp_c, 0, sizeof(*tp_c));
@@ -407,7 +398,6 @@ static void u32_destroy(struct tcf_proto *tp)
 		kfree(tp_c);
 	}
 
-	MOD_DEC_USE_COUNT;
 	tp->data = NULL;
 }
 
@@ -635,7 +625,6 @@ static void u32_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 	}
 }
 
-#ifdef CONFIG_RTNETLINK
 static int u32_dump(struct tcf_proto *tp, unsigned long fh,
 		     struct sk_buff *skb, struct tcmsg *t)
 {
@@ -694,25 +683,20 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
-#endif
 
 struct tcf_proto_ops cls_u32_ops = {
-	NULL,
-	"u32",
-	u32_classify,
-	u32_init,
-	u32_destroy,
-
-	u32_get,
-	u32_put,
-	u32_change,
-	u32_delete,
-	u32_walk,
-#ifdef CONFIG_RTNETLINK
-	u32_dump
-#else
-	NULL
-#endif
+	.next		=	NULL,
+	.kind		=	"u32",
+	.classify	=	u32_classify,
+	.init		=	u32_init,
+	.destroy	=	u32_destroy,
+	.get		=	u32_get,
+	.put		=	u32_put,
+	.change		=	u32_change,
+	.delete		=	u32_delete,
+	.walk		=	u32_walk,
+	.dump		=	u32_dump,
+	.owner		=	THIS_MODULE,
 };
 
 #ifdef MODULE
@@ -726,3 +710,4 @@ void cleanup_module(void)
 	unregister_tcf_proto_ops(&cls_u32_ops);
 }
 #endif
+MODULE_LICENSE("GPL");

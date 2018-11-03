@@ -24,8 +24,7 @@
  */
 
 #include <linux/module.h>
-#include <linux/version.h>
-#include <linux/malloc.h>	/* for kmalloc() and kfree() */
+#include <linux/slab.h>	/* for kmalloc() and kfree() */
 #include <linux/sched.h>	/* for struct wait_queue etc */
 #include <linux/major.h>
 #include <linux/types.h>
@@ -37,7 +36,6 @@
 #include <linux/devfs_fs_kernel.h>
 #include <linux/smp_lock.h>
 
-#include <asm/segment.h>
 #include <asm/atarihw.h>
 #include <asm/traps.h>
 #include <asm/uaccess.h>	/* For put_user and get_user */
@@ -59,12 +57,9 @@
 #define DSP56K_TRANSMIT		(dsp56k_host_interface.isr & DSP56K_ISR_TXDE)
 #define DSP56K_RECEIVE		(dsp56k_host_interface.isr & DSP56K_ISR_RXDF)
 
-#define max(a,b) ((a) > (b) ? (a) : (b))
-#define min(a,b) ((a) < (b) ? (a) : (b))
-
 #define wait_some(n) \
 { \
-	current->state = TASK_INTERRUPTIBLE; \
+	set_current_state(TASK_INTERRUPTIBLE); \
 	schedule_timeout(n); \
 }
 
@@ -72,7 +67,7 @@
 { \
 	long i, t, m; \
 	while (count > 0) { \
-		m = min(count, maxio); \
+		m = min_t(unsigned long, count, maxio); \
 		for (i = 0; i < m; i++) { \
 			for (t = 0; t < timeout && !ENABLE; t++) \
 				wait_some(HZ/50); \
@@ -149,7 +144,7 @@ static int sizeof_bootstrap = 375;
 
 
 static struct dsp56k_device {
-	int in_use;
+	long in_use;
 	long maxio, timeout;
 	int tx_wsize, rx_wsize;
 } dsp56k;
@@ -211,7 +206,7 @@ static ssize_t dsp56k_read(struct file *file, char *buf, size_t count,
 			   loff_t *ppos)
 {
 	struct inode *inode = file->f_dentry->d_inode;
-	int dev = MINOR(inode->i_rdev) & 0x0f;
+	int dev = iminor(inode) & 0x0f;
 
 	switch(dev)
 	{
@@ -265,7 +260,7 @@ static ssize_t dsp56k_read(struct file *file, char *buf, size_t count,
 	}
 
 	default:
-		printk("DSP56k driver: Unknown minor device: %d\n", dev);
+		printk(KERN_ERR "DSP56k driver: Unknown minor device: %d\n", dev);
 		return -ENXIO;
 	}
 }
@@ -274,7 +269,7 @@ static ssize_t dsp56k_write(struct file *file, const char *buf, size_t count,
 			    loff_t *ppos)
 {
 	struct inode *inode = file->f_dentry->d_inode;
-	int dev = MINOR(inode->i_rdev) & 0x0f;
+	int dev = iminor(inode) & 0x0f;
 
 	switch(dev)
 	{
@@ -327,7 +322,7 @@ static ssize_t dsp56k_write(struct file *file, const char *buf, size_t count,
 		return -EFAULT;
 	}
 	default:
-		printk("DSP56k driver: Unknown minor device: %d\n", dev);
+		printk(KERN_ERR "DSP56k driver: Unknown minor device: %d\n", dev);
 		return -ENXIO;
 	}
 }
@@ -335,7 +330,7 @@ static ssize_t dsp56k_write(struct file *file, const char *buf, size_t count,
 static int dsp56k_ioctl(struct inode *inode, struct file *file,
 			unsigned int cmd, unsigned long arg)
 {
-	int dev = MINOR(inode->i_rdev) & 0x0f;
+	int dev = iminor(inode) & 0x0f;
 
 	switch(dev)
 	{
@@ -416,7 +411,7 @@ static int dsp56k_ioctl(struct inode *inode, struct file *file,
 		return 0;
 
 	default:
-		printk("DSP56k driver: Unknown minor device: %d\n", dev);
+		printk(KERN_ERR "DSP56k driver: Unknown minor device: %d\n", dev);
 		return -ENXIO;
 	}
 }
@@ -428,7 +423,7 @@ static int dsp56k_ioctl(struct inode *inode, struct file *file,
 #if 0
 static unsigned int dsp56k_poll(struct file *file, poll_table *wait)
 {
-	int dev = MINOR(file->f_dentry->d_inode->i_rdev) & 0x0f;
+	int dev = iminor(file->f_dentry->d_inode) & 0x0f;
 
 	switch(dev)
 	{
@@ -445,16 +440,15 @@ static unsigned int dsp56k_poll(struct file *file, poll_table *wait)
 
 static int dsp56k_open(struct inode *inode, struct file *file)
 {
-	int dev = MINOR(inode->i_rdev) & 0x0f;
+	int dev = iminor(inode) & 0x0f;
 
 	switch(dev)
 	{
 	case DSP56K_DEV_56001:
 
-		if (dsp56k.in_use)
+		if (test_and_set_bit(0, &dsp56k.in_use))
 			return -EBUSY;
 
-		dsp56k.in_use = 1;
 		dsp56k.timeout = TIMEOUT;
 		dsp56k.maxio = MAXIO;
 		dsp56k.rx_wsize = dsp56k.tx_wsize = 4; 
@@ -469,8 +463,7 @@ static int dsp56k_open(struct inode *inode, struct file *file)
 		break;
 
 	default:
-		printk("DSP56k driver: Unknown minor device: %d\n", dev);
-		return -ENXIO;
+		return -ENODEV;
 	}
 
 	return 0;
@@ -478,19 +471,15 @@ static int dsp56k_open(struct inode *inode, struct file *file)
 
 static int dsp56k_release(struct inode *inode, struct file *file)
 {
-	int dev = MINOR(inode->i_rdev) & 0x0f;
+	int dev = iminor(inode) & 0x0f;
 
 	switch(dev)
 	{
 	case DSP56K_DEV_56001:
-
-		lock_kernel();
-		dsp56k.in_use = 0;
-		unlock_kernel();
-
+		clear_bit(0, &dsp56k.in_use);
 		break;
 	default:
-		printk("DSP56k driver: Unknown minor device: %d\n", dev);
+		printk(KERN_ERR "DSP56k driver: Unknown minor device: %d\n", dev);
 		return -ENXIO;
 	}
 
@@ -498,51 +487,44 @@ static int dsp56k_release(struct inode *inode, struct file *file)
 }
 
 static struct file_operations dsp56k_fops = {
-	owner:		THIS_MODULE,
-	read:		dsp56k_read,
-	write:		dsp56k_write,
-	ioctl:		dsp56k_ioctl,
-	open:		dsp56k_open,
-	release:	dsp56k_release,
+	.owner		= THIS_MODULE,
+	.read		= dsp56k_read,
+	.write		= dsp56k_write,
+	.ioctl		= dsp56k_ioctl,
+	.open		= dsp56k_open,
+	.release	= dsp56k_release,
 };
 
 
 /****** Init and module functions ******/
 
-static devfs_handle_t devfs_handle;
+static char banner[] __initdata = KERN_INFO "DSP56k driver installed\n";
 
-int __init dsp56k_init(void)
+static int __init dsp56k_init_driver(void)
 {
 	if(!MACH_IS_ATARI || !ATARIHW_PRESENT(DSP56K)) {
 		printk("DSP56k driver: Hardware not present\n");
 		return -ENODEV;
 	}
 
-	if(devfs_register_chrdev(DSP56K_MAJOR, "dsp56k", &dsp56k_fops)) {
+	if(register_chrdev(DSP56K_MAJOR, "dsp56k", &dsp56k_fops)) {
 		printk("DSP56k driver: Unable to register driver\n");
 		return -ENODEV;
 	}
-	devfs_handle = devfs_register (NULL, "dsp56k", DEVFS_FL_DEFAULT,
-				       DSP56K_MAJOR, 0,
-				       S_IFCHR | S_IRUSR | S_IWUSR,
-				       &dsp56k_fops, NULL);
 
-	dsp56k.in_use = 0;
+	devfs_mk_cdev(MKDEV(DSP56K_MAJOR, 0),
+		      S_IFCHR | S_IRUSR | S_IWUSR, "dsp56k");
 
-	printk("DSP56k driver installed\n");
-
+	printk(banner);
 	return 0;
 }
+module_init(dsp56k_init_driver);
 
-#ifdef MODULE
-int init_module(void)
+static void __exit dsp56k_cleanup_driver(void)
 {
-	return dsp56k_init();
+	unregister_chrdev(DSP56K_MAJOR, "dsp56k");
+	devfs_remove("dsp56k");
 }
+module_exit(dsp56k_cleanup_driver);
 
-void cleanup_module(void)
-{
-	devfs_unregister_chrdev(DSP56K_MAJOR, "dsp56k");
-	devfs_unregister (devfs_handle);
-}
-#endif /* MODULE */
+MODULE_LICENSE("GPL");

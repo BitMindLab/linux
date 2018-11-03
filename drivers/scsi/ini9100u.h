@@ -33,7 +33,7 @@
  *    derived from this software without specific prior written permission.
  *
  * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
+ * the GNU General Public License ("GPL") and the terms of the GPL would require the 
  * combined work to also be released under the terms of the GPL, the terms
  * and conditions of this License will apply in addition to those of the
  * GPL with the exception of any terms or conditions of this License that
@@ -74,8 +74,7 @@
 #ifndef	LINUX_VERSION_CODE
 #include <linux/version.h>
 #endif
-
-#include "sd.h"
+#include <linux/types.h>
 
 extern int i91u_detect(Scsi_Host_Template *);
 extern int i91u_release(struct Scsi_Host *);
@@ -83,59 +82,23 @@ extern int i91u_command(Scsi_Cmnd *);
 extern int i91u_queue(Scsi_Cmnd *, void (*done) (Scsi_Cmnd *));
 extern int i91u_abort(Scsi_Cmnd *);
 extern int i91u_reset(Scsi_Cmnd *, unsigned int);
-extern int i91u_biosparam(Scsi_Disk *, kdev_t, int *);	/*for linux v2.0 */
+extern int i91u_biosparam(struct scsi_device *, struct block_device *,
+		sector_t, int *);
 
 #define i91u_REVID "Initio INI-9X00U/UW SCSI device driver; Revision: 1.03g"
-
-#define INI9100U	{ \
-	next:		NULL,						\
-	module:		NULL,						\
-	proc_name:	"INI9100U", \
-	proc_info:	NULL,				\
-	name:		i91u_REVID, \
-	detect:		i91u_detect, \
-	release:	i91u_release, \
-	info:		NULL,					\
-	command:	i91u_command, \
-	queuecommand:	i91u_queue, \
- 	eh_strategy_handler: NULL, \
- 	eh_abort_handler: NULL, \
- 	eh_device_reset_handler: NULL, \
- 	eh_bus_reset_handler: NULL, \
- 	eh_host_reset_handler: NULL, \
-	abort:		i91u_abort, \
-	reset:		i91u_reset, \
-	slave_attach:	NULL, \
-	bios_param:	i91u_biosparam, \
-	can_queue:	1, \
-	this_id:	1, \
-	sg_tablesize:	SG_ALL, \
-	cmd_per_lun: 	1, \
-	present:	0, \
-	unchecked_isa_dma: 0, \
-	use_clustering:	ENABLE_CLUSTERING, \
- use_new_eh_code: 0 \
-}
 
 #define VIRT_TO_BUS(i)  (unsigned int) virt_to_bus((void *)(i))
 #define ULONG   unsigned long
 #define USHORT  unsigned short
 #define UCHAR   unsigned char
-#define BYTE    unsigned char
+#define BYTE    u8
 #define WORD    unsigned short
 #define DWORD   unsigned long
-#define UBYTE   unsigned char
+#define UBYTE   u8
 #define UWORD   unsigned short
 #define UDWORD  unsigned long
-#ifdef ALPHA
-#define U32   unsigned int
-#else
-#define U32   unsigned long
-#endif
+#define U32   u32
 
-#ifndef NULL
-#define NULL     0		/* zero          */
-#endif
 #ifndef TRUE
 #define TRUE     (1)		/* boolean true  */
 #endif
@@ -276,6 +239,7 @@ typedef struct Ha_Ctrl_Struc {
 	spinlock_t HCS_AvailLock;
 	spinlock_t HCS_SemaphLock;
 	spinlock_t pSRB_lock;
+	struct pci_dev *pci_dev;
 } HCS;
 
 /* Bit Definition for HCB_Flags */

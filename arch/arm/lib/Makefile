@@ -1,62 +1,40 @@
 #
 # linux/arch/arm/lib/Makefile
 #
-# Copyright (C) 1995-1999 Russell King
+# Copyright (C) 1995-2000 Russell King
 #
 
-USE_STANDARD_AS_RULE := true
+lib-y		:= backtrace.o changebit.o csumipv6.o csumpartial.o   \
+		   csumpartialcopy.o csumpartialcopyuser.o clearbit.o \
+		   copy_page.o delay.o findbit.o memchr.o memcpy.o    \
+		   memset.o memzero.o setbit.o strncpy_from_user.o    \
+		   strnlen_user.o strchr.o strrchr.o testchangebit.o  \
+		   testclearbit.o testsetbit.o uaccess.o getuser.o    \
+		   putuser.o ashldi3.o ashrdi3.o lshrdi3.o muldi3.o   \
+		   ucmpdi2.o udivdi3.o lib1funcs.o div64.o
 
-L_TARGET := lib.a
-L_OBJS   := changebit.o csumipv6.o csumpartial.o csumpartialcopy.o \
-	    csumpartialcopyuser.o clearbit.o copy_page.o findbit.o \
-	    memchr.o memcpy.o memset.o memzero.o setbit.o          \
-	    strncpy_from_user.o strnlen_user.o strchr.o strrchr.o  \
-	    testchangebit.o testclearbit.o testsetbit.o uaccess.o
+lib-arc		:= ecard.o io-acorn.o floppydma.o
+lib-rpc		:= ecard.o io-acorn.o floppydma.o
+lib-clps7500	:= io-acorn.o
+lib-l7200     	:= io-acorn.o
+lib-shark	:= io-shark.o
+lib-edb7211	:= io-acorn.o
 
-l-obj-y	:=
-l-obj-n	:=
+lib-y		+= $(lib-$(MACHINE))
 
-O_TARGET := lib.o
-O_OBJS   := backtrace.o delay.o
-
-ifeq ($(CONFIG_ARCH_ACORN),y)
-  half := n
-  full := y
+ifeq ($(CONFIG_CPU_32v3),y)
+  v3		:= y
+  v4		:= n
 else
-  half := y
-  full := n
+  v3		:= n
+  v4		:= y
 endif
 
-L_OBJS_arc		:= ecard.o io-acorn.o floppydma.o
-L_OBJS_rpc		:= ecard.o io-acorn.o floppydma.o
-L_OBJS_clps7500		:= io-acorn.o
-L_OBJS_footbridge	:= io-pcio.o
-L_OBJS_l7200     	:= io-acorn.o
-L_OBJS_nexuspci		:= io-pcio.o
-L_OBJS_sa1100		:= io-pcio.o
-L_OBJS_shark		:= io-shark.o
-L_OBJS_integrator	:= io-pcio.o
-L_OBJS_clps711x		:= io-shark.o
+lib-y		+= io-readsb.o io-writesb.o
+lib-$(v3)	+= io-readsw-armv3.o io-writesw-armv3.o io-readsl-armv3.o
+lib-$(v4)	+= io-readsw-armv4.o io-writesw-armv4.o io-readsl-armv4.o
+lib-y		+= io-writesl.o
 
-l-obj-y			+= io-readsb.o io-writesb.o
-l-obj-$(full)		+= io-readsw-armv3.o io-writesw-armv3.o
-l-obj-$(half)		+= io-readsw-armv4.o io-writesw-armv4.o
-l-obj-y			+= io-readsl.o io-writesl.o
+$(obj)/csumpartialcopy.o:	$(obj)/csumpartialcopygeneric.S
+$(obj)/csumpartialcopyuser.o:	$(obj)/csumpartialcopygeneric.S
 
-ifeq ($(PROCESSOR),armo)
-  L_OBJS += uaccess-armo.o
-endif
-
-ifneq ($(MACHINE),ebsa110)
-  OX_OBJS += io.o
-endif
-
-L_OBJS	+= $(L_OBJS_$(MACHINE)) $(l-obj-y)
-
-include $(TOPDIR)/Rules.make
-
-constants.h: getconsdata.o extractconstants.pl
-	$(PERL) extractconstants.pl $(OBJDUMP) > $@
-
-getconsdata.o: getconsdata.c
-	$(CC) $(CFLAGS) -c getconsdata.c

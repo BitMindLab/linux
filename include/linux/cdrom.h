@@ -77,7 +77,7 @@
 #define CDROM_GET_MCN		0x5311 /* Obtain the "Universal Product Code" 
                                            if available (struct cdrom_mcn) */
 #define CDROM_GET_UPC		CDROM_GET_MCN  /* This one is depricated, 
-                                          but here anyway for compatability */
+                                          but here anyway for compatibility */
 #define CDROMRESET		0x5312 /* hard-reset the drive */
 #define CDROMVOLREAD		0x5313 /* Get the drive's volume setting 
                                           (struct cdrom_volctrl) */
@@ -128,8 +128,13 @@
 #define CDROM_DEBUG		0x5330	/* Turn debug messages on/off */
 #define CDROM_GET_CAPABILITY	0x5331	/* get capabilities */
 
+/* Note that scsi/scsi_ioctl.h also uses 0x5382 - 0x5386.
+ * Future CDROM ioctls should be kept below 0x537F
+ */
+
 /* This ioctl is only used by sbpcd at the moment */
 #define CDROMAUDIOBUFSIZ        0x5382	/* set the audio buffer size */
+					/* conflict with SCSI_IOCTL_GET_IDLUN */
 
 /* DVD-ROM Specific ioctls */
 #define DVD_READ_STRUCT		0x5390  /* Read structure */
@@ -382,6 +387,7 @@ struct cdrom_generic_command
 #define CDC_DVD			0x8000	/* drive is a DVD */
 #define CDC_DVD_R		0x10000	/* drive can write DVD-R */
 #define CDC_DVD_RAM		0x20000	/* drive can write DVD-RAM */
+#define CDC_MO_DRIVE		0x40000 /* drive is an MO device */
 
 /* drive status possibilities returned by CDROM_DRIVE_STATUS ioctl */
 #define CDS_NO_INFO		0	/* if not implemented */
@@ -524,10 +530,12 @@ struct dvd_layer {
 	__u32 end_sector_l0;
 };
 
+#define DVD_LAYERS	4
+
 struct dvd_physical {
 	__u8 type;
 	__u8 layer_num;
-	struct dvd_layer layer[4];
+	struct dvd_layer layer[DVD_LAYERS];
 };
 
 struct dvd_copyright {
@@ -708,7 +716,8 @@ struct request_sense {
 };
 
 #ifdef __KERNEL__
-#include <linux/devfs_fs_kernel.h>
+#include <linux/fs.h>		/* not really needed, later.. */
+#include <linux/device.h>
 
 struct cdrom_write_settings {
 	unsigned char fpacket;		/* fixed/variable packets */
@@ -722,9 +731,7 @@ struct cdrom_device_info {
 	struct cdrom_device_ops  *ops;  /* link to device_ops */
 	struct cdrom_device_info *next; /* next device_info for this major */
 	void *handle;		        /* driver-dependent data */
-	devfs_handle_t de;		/* real driver creates this  */
 /* specifications */
-        kdev_t dev;	                /* device number */
 	int mask;                       /* mask of capability: disables them */
 	int speed;			/* maximum speed for reading data */
 	int capacity;			/* number of discs in jukebox */
@@ -769,7 +776,10 @@ struct cdrom_device_ops {
 };
 
 /* the general block_device operations structure: */
-extern struct block_device_operations cdrom_fops;
+extern int cdrom_open(struct cdrom_device_info *, struct inode *, struct file *);
+extern int cdrom_release(struct cdrom_device_info *, struct file *);
+extern int cdrom_ioctl(struct cdrom_device_info *, struct inode *, unsigned, unsigned long);
+extern int cdrom_media_changed(struct cdrom_device_info *);
 
 extern int register_cdrom(struct cdrom_device_info *cdi);
 extern int unregister_cdrom(struct cdrom_device_info *cdi);
@@ -782,11 +792,8 @@ typedef struct {
     long error;
 } tracktype;
 
-extern void cdrom_count_tracks(struct cdrom_device_info *cdi,tracktype* tracks);
-extern int cdrom_get_next_writable(kdev_t dev, long *next_writable);
-extern int cdrom_get_last_written(kdev_t dev, long *last_written);
+extern int cdrom_get_last_written(struct cdrom_device_info *cdi, long *last_written);
 extern int cdrom_number_of_slots(struct cdrom_device_info *cdi);
-extern int cdrom_select_disc(struct cdrom_device_info *cdi, int slot);
 extern int cdrom_mode_select(struct cdrom_device_info *cdi,
 			     struct cdrom_generic_command *cgc);
 extern int cdrom_mode_sense(struct cdrom_device_info *cdi,
@@ -794,7 +801,6 @@ extern int cdrom_mode_sense(struct cdrom_device_info *cdi,
 			    int page_code, int page_control);
 extern void init_cdrom_command(struct cdrom_generic_command *cgc,
 			       void *buffer, int len, int type);
-extern struct cdrom_device_info *cdrom_find_device(kdev_t dev);
 
 typedef struct {
 	__u16 disc_information_length;
@@ -877,10 +883,6 @@ typedef struct {
 	__u32 track_size;
 	__u32 last_rec_address;
 } track_information;
-
-extern int cdrom_get_disc_info(kdev_t dev, disc_information *di);
-extern int cdrom_get_track_info(kdev_t dev, __u16 track, __u8 type,
-				track_information *ti);
 
 /* The SCSI spec says there could be 256 slots. */
 #define CDROM_MAX_SLOTS	256

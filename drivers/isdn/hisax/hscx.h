@@ -1,12 +1,16 @@
-/* $Id: hscx.h,v 1.6 2000/06/26 08:59:13 keil Exp $
+/* $Id: hscx.h,v 1.6.6.2 2001/09/23 22:24:48 kai Exp $
  *
- * hscx.h   HSCX specific defines
+ * HSCX specific defines
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
+
+#include <linux/interrupt.h>
 
 /* All Registers original Siemens Spec  */
 
@@ -32,9 +36,10 @@
 #define HSCX_RLCR 0x2e
 #define HSCX_MASK 0x20
 
-extern int HscxVersion(struct IsdnCardState *cs, char *s);
-extern void hscx_sched_event(struct BCState *bcs, int event);
 extern void modehscx(struct BCState *bcs, int mode, int bc);
-extern void clear_pending_hscx_ints(struct IsdnCardState *cs);
-extern void inithscx(struct IsdnCardState *cs);
-extern void inithscxisac(struct IsdnCardState *cs, int part);
+extern void inithscxisac(struct IsdnCardState *cs);
+extern void hscx_int_main(struct IsdnCardState *cs, u8 val);
+extern irqreturn_t hscxisac_irq(int intno, void *dev_id, struct pt_regs *regs);
+extern int  hscxisac_setup(struct IsdnCardState *cs,
+			   struct dc_hw_ops *isac_ops,
+			   struct bc_hw_ops *hscx_ops);

@@ -2,15 +2,7 @@
 # Makefile for all Linux ACPI interpreter subdirectories
 #
 
-O_TARGET := ../$(shell basename `pwd`).o
-
-obj-$(CONFIG_ACPI) := $(patsubst %.c,%.o,$(wildcard *.c))
-
-EXTRA_CFLAGS += -I../include
+obj-y := rsaddr.o  rscreate.o  rsio.o   rslist.o    rsmisc.o   rsxface.o \
+	 rscalc.o  rsdump.o    rsirq.o  rsmemory.o  rsutils.o
 
 EXTRA_CFLAGS += $(ACPI_CFLAGS)
-
-include $(TOPDIR)/Rules.make
-
-clean:
-	$(RM) *.o 

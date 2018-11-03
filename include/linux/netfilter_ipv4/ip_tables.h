@@ -289,7 +289,7 @@ struct ipt_get_entries
 #define IPT_ERROR_TARGET "ERROR"
 
 /* Helper functions */
-extern __inline__ struct ipt_entry_target *
+static __inline__ struct ipt_entry_target *
 ipt_get_target(struct ipt_entry *e)
 {
 	return (void *)e + e->target_offset;
@@ -300,14 +300,14 @@ ipt_get_target(struct ipt_entry *e)
 ({						\
 	unsigned int __i;			\
 	int __ret = 0;				\
-	struct ipt_entry_match *__m;		\
+	struct ipt_entry_match *__match;	\
 						\
 	for (__i = sizeof(struct ipt_entry);	\
 	     __i < (e)->target_offset;		\
-	     __i += __m->u.match_size) {	\
-		__m = (void *)(e) + __i;	\
+	     __i += __match->u.match_size) {	\
+		__match = (void *)(e) + __i;	\
 						\
-		__ret = fn(__m , ## args);	\
+		__ret = fn(__match , ## args);	\
 		if (__ret != 0)			\
 			break;			\
 	}					\
@@ -319,12 +319,12 @@ ipt_get_target(struct ipt_entry *e)
 ({								\
 	unsigned int __i;					\
 	int __ret = 0;						\
-	struct ipt_entry *__e;					\
+	struct ipt_entry *__entry;				\
 								\
-	for (__i = 0; __i < (size); __i += __e->next_offset) {	\
-		__e = (void *)(entries) + __i;			\
+	for (__i = 0; __i < (size); __i += __entry->next_offset) { \
+		__entry = (void *)(entries) + __i;		\
 								\
-		__ret = fn(__e , ## args);			\
+		__ret = fn(__entry , ## args);			\
 		if (__ret != 0)					\
 			break;					\
 	}							\
@@ -347,13 +347,14 @@ struct ipt_match
 
 	/* Return true or false: return FALSE and set *hotdrop = 1 to
            force immediate packet drop. */
+	/* Arguments changed since 2.4, as this must now handle
+           non-linear skbs, using skb_copy_bits and
+           skb_ip_make_writable. */
 	int (*match)(const struct sk_buff *skb,
 		     const struct net_device *in,
 		     const struct net_device *out,
 		     const void *matchinfo,
 		     int offset,
-		     const void *hdr,
-		     u_int16_t datalen,
 		     int *hotdrop);
 
 	/* Called when user tries to insert an entry of this type. */
@@ -367,7 +368,7 @@ struct ipt_match
 	/* Called when entry of this type deleted. */
 	void (*destroy)(void *matchinfo, unsigned int matchinfosize);
 
-	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
+	/* Set this to THIS_MODULE. */
 	struct module *me;
 };
 
@@ -377,14 +378,6 @@ struct ipt_target
 	struct list_head list;
 
 	const char name[IPT_FUNCTION_MAXNAMELEN];
-
-	/* Returns verdict. */
-	unsigned int (*target)(struct sk_buff **pskb,
-			       unsigned int hooknum,
-			       const struct net_device *in,
-			       const struct net_device *out,
-			       const void *targinfo,
-			       void *userdata);
 
 	/* Called when user tries to insert an entry of this type:
            hook_mask is a bitmask of hooks from which it can be
@@ -399,7 +392,17 @@ struct ipt_target
 	/* Called when entry of this type deleted. */
 	void (*destroy)(void *targinfo, unsigned int targinfosize);
 
-	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
+	/* Returns verdict.  Argument order changed since 2.4, as this
+           must now handle non-linear skbs, using skb_copy_bits and
+           skb_ip_make_writable. */
+	unsigned int (*target)(struct sk_buff **pskb,
+			       const struct net_device *in,
+			       const struct net_device *out,
+			       unsigned int hooknum,
+			       const void *targinfo,
+			       void *userdata);
+
+	/* Set this to THIS_MODULE. */
 	struct module *me;
 };
 
@@ -428,6 +431,9 @@ struct ipt_table
 
 	/* Man behind the curtain... */
 	struct ipt_table_info *private;
+
+	/* Set to THIS_MODULE. */
+	struct module *me;
 };
 
 extern int ipt_register_table(struct ipt_table *table);

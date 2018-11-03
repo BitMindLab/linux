@@ -1,9 +1,7 @@
 /*
  *  arch/ppc/kernel/except_8xx.S
  *
- *  $Id: head_8xx.S,v 1.4 1999/09/18 18:43:19 dmalek Exp $
- *
- *  PowerPC version 
+ *  PowerPC version
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
  *  Rewritten by Cort Dougan (cort@cs.nmt.edu) for PReP
  *    Copyright (C) 1996 Cort Dougan <cort@cs.nmt.edu>
@@ -20,23 +18,19 @@
  *  modify it under the terms of the GNU General Public License
  *  as published by the Free Software Foundation; either version
  *  2 of the License, or (at your option) any later version.
- *	
+ *
  */
 
-#include "ppc_asm.h"
+#include <linux/config.h>
 #include <asm/processor.h>
 #include <asm/page.h>
-#include <linux/config.h>
 #include <asm/mmu.h>
 #include <asm/cache.h>
 #include <asm/pgtable.h>
-	
-/* XXX need definitions here for 16 byte cachelines on some/all 8xx
-   -- paulus */
-CACHELINE_BYTES = 32
-LG_CACHELINE_BYTES = 5
-CACHELINE_MASK = 0x1f
-CACHELINE_WORDS = 8
+#include <asm/cputable.h>
+#include <asm/thread_info.h>
+#include <asm/ppc_asm.h>
+#include <asm/offsets.h>
 
 	.text
 	.globl	_stext
@@ -83,7 +77,7 @@ _start:
  * and the CCR at memory location 0.....Someday I'll fix this.....
  *	-- Dan
  */
-	
+
 	.globl	__start
 __start:
 	mr	r31,r3			/* save parameters */
@@ -93,70 +87,10 @@ __start:
 	mr	r27,r7
 	li	r24,0			/* cpu # */
 
-	tlbia			/* Invalidate all TLB entries */
-	li	r8, 0
-	mtspr	MI_CTR, r8	/* Set instruction control to zero */
-	lis	r8, MD_RESETVAL@h
-#ifndef CONFIG_8xx_COPYBACK
-	oris	r8, r8, MD_WTDEF@h
-#endif
-	mtspr	MD_CTR, r8	/* Set data TLB control */
-
-	/* Now map the lower 8 Meg into the TLBs.  For this quick hack,
-	 * we can load the instruction and data TLB registers with the
-	 * same values.
+	/* We have to turn on the MMU right away so we get cache modes
+	 * set correctly.
 	 */
-	lis	r8, KERNELBASE@h	/* Create vaddr for TLB */
-	ori	r8, r8, MI_EVALID	/* Mark it valid */
-	mtspr	MI_EPN, r8
-	mtspr	MD_EPN, r8
-	li	r8, MI_PS8MEG		/* Set 8M byte page */
-	ori	r8, r8, MI_SVALID	/* Make it valid */
-	mtspr	MI_TWC, r8
-	mtspr	MD_TWC, r8
-	li	r8, MI_BOOTINIT		/* Create RPN for address 0 */
-	mtspr	MI_RPN, r8		/* Store TLB entry */
-	mtspr	MD_RPN, r8
-	lis	r8, MI_Kp@h		/* Set the protection mode */
-	mtspr	MI_AP, r8
-	mtspr	MD_AP, r8
-
-	/* Map another 8 MByte at the IMMR to get the processor
-	 * internal registers (among other things).
-	 */
-	mfspr	r9, 638			/* Get current IMMR */
-	andis.	r9, r9, 0xff80		/* Get 8Mbyte boundary */
-
-	mr	r8, r9			/* Create vaddr for TLB */
-	ori	r8, r8, MD_EVALID	/* Mark it valid */
-	mtspr	MD_EPN, r8
-	li	r8, MD_PS8MEG		/* Set 8M byte page */
-	ori	r8, r8, MD_SVALID	/* Make it valid */
-	mtspr	MD_TWC, r8
-	mr	r8, r9			/* Create paddr for TLB */
-	ori	r8, r8, MI_BOOTINIT|0x2 /* Inhibit cache -- Cort */
-	mtspr	MD_RPN, r8
-
-	/* Since the cache is enabled according to the information we
-	 * just loaded into the TLB, invalidate and enable the caches here.
-	 * We should probably check/set other modes....later.
-	 */
-	lis	r8, IDC_INVALL@h
-	mtspr	IC_CST, r8
-	mtspr	DC_CST, r8
-	lis	r8, IDC_ENABLE@h
-	mtspr	IC_CST, r8
-#ifdef CONFIG_8xx_COPYBACK
-	mtspr	DC_CST, r8
-#else
-	/* For a debug option, I left this here to easily enable
-	 * the write through cache mode
-	 */
-	lis	r8, DC_SFWT@h
-	mtspr	DC_CST, r8
-	lis	r8, IDC_ENABLE@h
-	mtspr	DC_CST, r8
-#endif
+	bl	initial_mmu
 
 /* We now have the lower 8 Meg mapped into TLB entries, and the caches
  * ready to work.
@@ -232,7 +166,7 @@ label:						\
 	STD_EXCEPTION(0x100, Reset, __secondary_start_psurge)
 #else
 	STD_EXCEPTION(0x100, Reset, UnknownException)
-#endif	
+#endif
 
 /* Machine check */
 	STD_EXCEPTION(0x200, MachineCheck, MachineCheckException)
@@ -284,7 +218,7 @@ HardwareInterrupt:
 do_IRQ_intercept:
 	.long	do_IRQ;
 	.long	ret_from_intercept
-	
+
 
 /* Alignment exception */
 	. = 0x600
@@ -399,7 +333,7 @@ InstructionTLBMiss:
 	beq	2f		/* If zero, don't try to find a pte */
 
 	/* We have a pte table, so load the MI_TWC with the attributes
-	 * for this page, which has only bit 31 set.
+	 * for this "segment."
 	 */
 	tophys(r21,r21)
 	ori	r21,r21,1		/* Set valid bit */
@@ -408,7 +342,7 @@ InstructionTLBMiss:
 	stw	r3, 12(r0)
 	lwz	r3, 12(r0)
 #endif
-	mtspr	MI_TWC, r21	/* Set page attributes */
+	mtspr	MI_TWC, r21	/* Set segment attributes */
 #ifdef CONFIG_8xx_CPU6
 	li	r3, 0x3b80
 	stw	r3, 12(r0)
@@ -417,16 +351,19 @@ InstructionTLBMiss:
 	mtspr	MD_TWC, r21	/* Load pte table base address */
 	mfspr	r21, MD_TWC	/* ....and get the pte address */
 	lwz	r20, 0(r21)	/* Get the pte */
-#if 0
+
 	ori	r20, r20, _PAGE_ACCESSED
 	stw	r20, 0(r21)
-#endif
 
-	/* Set four subpage valid bits (24, 25, 26, and 27).
-	 * Clear bit 28 (which should be in the PTE, but we do this anyway).
+	/* The Linux PTE won't go exactly into the MMU TLB.
+	 * Software indicator bits 21, 22 and 28 must be clear.
+	 * Software indicator bits 24, 25, 26, and 27 must be
+	 * set.  All other Linux PTE bits control the behavior
+	 * of the MMU.
 	 */
 	li	r21, 0x00f0
-	rlwimi	r20, r21, 0, 24, 28
+	rlwimi	r20, r21, 0, 24, 28	/* Set 24-27, clear 28 */
+
 #ifdef CONFIG_8xx_CPU6
 	li	r3, 0x2d80
 	stw	r3, 12(r0)
@@ -506,15 +443,19 @@ DataStoreTLBMiss:
 #endif
 	mtspr	MD_TWC, r21
 
-	/* Set four subpage valid bits (24, 25, 26, and 27).
-	 * Clear bit 28 (which should be in the PTE, but we do this anyway).
+	mfspr	r21, MD_TWC	/* get the pte address again */
+	ori	r20, r20, _PAGE_ACCESSED
+	stw	r20, 0(r21)
+
+	/* The Linux PTE won't go exactly into the MMU TLB.
+	 * Software indicator bits 21, 22 and 28 must be clear.
+	 * Software indicator bits 24, 25, 26, and 27 must be
+	 * set.  All other Linux PTE bits control the behavior
+	 * of the MMU.
 	 */
-#if 0
-	ori	r20, r20, 0x00f0
-#else
 	li	r21, 0x00f0
-	rlwimi	r20, r21, 0, 24, 28
-#endif
+	rlwimi	r20, r21, 0, 24, 28	/* Set 24-27, clear 28 */
+
 #ifdef CONFIG_8xx_CPU6
 	li	r3, 0x3d80
 	stw	r3, 12(r0)
@@ -575,6 +516,34 @@ DataTLBError:
 	andis.	r21, r20, 0x0200	/* If set, indicates store op */
 	beq	2f
 
+	/* The EA of a data TLB miss is automatically stored in the MD_EPN
+	 * register.  The EA of a data TLB error is automatically stored in
+	 * the DAR, but not the MD_EPN register.  We must copy the 20 most
+	 * significant bits of the EA from the DAR to MD_EPN before we
+	 * start walking the page tables.  We also need to copy the CASID
+	 * value from the M_CASID register.
+	 * Addendum:  The EA of a data TLB error is _supposed_ to be stored
+	 * in DAR, but it seems that this doesn't happen in some cases, such
+	 * as when the error is due to a dcbi instruction to a page with a
+	 * TLB that doesn't have the changed bit set.  In such cases, there
+	 * does not appear to be any way  to recover the EA of the error
+	 * since it is neither in DAR nor MD_EPN.  As a workaround, the
+	 * _PAGE_HWWRITE bit is set for all kernel data pages when the PTEs
+	 * are initialized in mapin_ram().  This will avoid the problem,
+	 * assuming we only use the dcbi instruction on kernel addresses.
+	 */
+	mfspr	r20, DAR
+	rlwinm	r21, r20, 0, 0, 19
+	ori	r21, r21, MD_EVALID
+	mfspr	r20, M_CASID
+	rlwimi	r21, r20, 0, 28, 31
+#ifdef CONFIG_8xx_CPU6
+	li	r3, 0x3780
+	stw	r3, 12(r0)
+	lwz	r3, 12(r0)
+#endif
+	mtspr	MD_EPN, r21
+
 	mfspr	r20, M_TWB	/* Get level 1 table entry address */
 
 	/* If we are faulting a kernel address, we have to use the
@@ -608,15 +577,19 @@ DataTLBError:
 
 	/* Update 'changed', among others.
 	*/
-	ori	r20, r20, _PAGE_DIRTY|_PAGE_HWWRITE|_PAGE_ACCESSED
+	ori	r20, r20, _PAGE_DIRTY|_PAGE_ACCESSED|_PAGE_HWWRITE
 	mfspr	r21, MD_TWC		/* Get pte address again */
 	stw	r20, 0(r21)		/* and update pte in table */
 
-	/* Set four subpage valid bits (24, 25, 26, and 27).
-	 * Clear bit 28 (which should be in the PTE, but we do this anyway).
+	/* The Linux PTE won't go exactly into the MMU TLB.
+	 * Software indicator bits 21, 22 and 28 must be clear.
+	 * Software indicator bits 24, 25, 26, and 27 must be
+	 * set.  All other Linux PTE bits control the behavior
+	 * of the MMU.
 	 */
 	li	r21, 0x00f0
-	rlwimi	r20, r21, 0, 24, 28
+	rlwimi	r20, r21, 0, 24, 28	/* Set 24-27, clear 28 */
+
 #ifdef CONFIG_8xx_CPU6
 	li	r3, 0x3d80
 	stw	r3, 12(r0)
@@ -661,194 +634,38 @@ DataTLBError:
 
 	. = 0x2000
 
-/*
- * This code finishes saving the registers to the exception frame
- * and jumps to the appropriate handler for the exception, turning
- * on address translation.
- */
-	.globl	transfer_to_handler
-transfer_to_handler:
-	stw	r22,_NIP(r21)
-	lis	r22,MSR_POW@h
-	andc	r23,r23,r22
-	stw	r23,_MSR(r21)
-	SAVE_4GPRS(8, r21)
-	SAVE_8GPRS(12, r21)
-	SAVE_8GPRS(24, r21)
-	andi.	r23,r23,MSR_PR
-	mfspr	r23,SPRG3		/* if from user, fix up THREAD.regs */
-	beq	2f
-	addi	r24,r1,STACK_FRAME_OVERHEAD
-	stw	r24,PT_REGS(r23)
-2:	addi	r2,r23,-THREAD		/* set r2 to current */
-	tovirt(r2,r2)
-	mflr	r23
-	andi.	r24,r23,0x3f00		/* get vector offset */
-	stw	r24,TRAP(r21)
-	li	r22,RESULT
-	stwcx.	r22,r22,r21		/* to clear the reservation */
-	li	r22,0
-	stw	r22,RESULT(r21)
-	mtspr	SPRG2,r22		/* r1 is now kernel sp */
-	addi	r24,r2,TASK_STRUCT_SIZE	/* check for kernel stack overflow */
-	cmplw	0,r1,r2
-	cmplw	1,r1,r24
-	crand	1,1,4
-	bgt-	stack_ovf		/* if r2 < r1 < r2+TASK_STRUCT_SIZE */
-	lwz	r24,0(r23)		/* virtual address of handler */
-	lwz	r23,4(r23)		/* where to go when done */
-	mtspr	SRR0,r24
-	mtspr	SRR1,r20
-	mtlr	r23
-	SYNC
-	rfi				/* jump to handler, enable MMU */
-
-/*
- * On kernel stack overflow, load up an initial stack pointer
- * and call StackOverflow(regs), which should not return.
- */
-stack_ovf:
-	addi	r3,r1,STACK_FRAME_OVERHEAD
-	lis	r1,init_task_union@ha
-	addi	r1,r1,init_task_union@l
-	addi	r1,r1,TASK_UNION_SIZE-STACK_FRAME_OVERHEAD
-	lis	r24,StackOverflow@ha
-	addi	r24,r24,StackOverflow@l
-	li	r20,MSR_KERNEL
-	mtspr	SRR0,r24
-	mtspr	SRR1,r20
-	SYNC
-	rfi
-
 	.globl	giveup_fpu
 giveup_fpu:
 	blr
 
-/*
- * This code is jumped to from the startup code to copy
- * the kernel image to physical address 0.
- */
-relocate_kernel:
-	lis	r9,0x426f		/* if booted from BootX, don't */
-	addi	r9,r9,0x6f58		/* translate source addr */
-	cmpw	r31,r9			/* (we have to on chrp) */
-	beq	7f
-	rlwinm	r4,r4,0,8,31		/* translate source address */
-	add	r4,r4,r3		/* to region mapped with BATs */
-7:	addis	r9,r26,klimit@ha	/* fetch klimit */
-	lwz	r25,klimit@l(r9)
-	addis	r25,r25,-KERNELBASE@h
-	li	r6,0			/* Destination offset */
-	li	r5,0x4000		/* # bytes of memory to copy */
-	bl	copy_and_flush		/* copy the first 0x4000 bytes */
-	addi	r0,r3,4f@l		/* jump to the address of 4f */
-	mtctr	r0			/* in copy and do the rest. */
-	bctr				/* jump to the copy */
-4:	mr	r5,r25
-	bl	copy_and_flush		/* copy the rest */
-	b	turn_on_mmu
-
-/*
- * Copy routine used to copy the kernel to start at physical address 0
- * and flush and invalidate the caches as needed.
- * r3 = dest addr, r4 = source addr, r5 = copy limit, r6 = start offset
- * on exit, r3, r4, r5 are unchanged, r6 is updated to be >= r5.
- */
-copy_and_flush:
-	addi	r5,r5,-4
-	addi	r6,r6,-4
-4:	li	r0,CACHELINE_WORDS
-	mtctr	r0
-3:	addi	r6,r6,4			/* copy a cache line */
-	lwzx	r0,r6,r4
-	stwx	r0,r6,r3
-	bdnz	3b
-	dcbst	r6,r3			/* write it to memory */
-	sync
-	icbi	r6,r3			/* flush the icache line */
-	cmplw	0,r6,r5
-	blt	4b
-	isync
-	addi	r5,r5,4
-	addi	r6,r6,4
+/* Maybe someday.......
+*/
+_GLOBAL(__setup_cpu_8xx)
 	blr
 
-#ifdef CONFIG_SMP
-	.globl	__secondary_start_psurge
-__secondary_start_psurge:
-	li	r24,1			/* cpu # */
-	b	__secondary_start
-
-	.globl	__secondary_hold
-__secondary_hold:
-	/* tell the master we're here */
-	lis	r5,0x4@h
-	ori	r5,r5,0x4@l
-	stw	r3,0(r5)
-	dcbf	0,r5
-100:
-	lis	r5,0
-	dcbi	0,r5
-	lwz	r4,0(r5)
-	/* wait until we're told to start */
-	cmp	0,r4,r3
-	bne	100b
-	/* our cpu # was at addr 0 - go */
-	lis	r5,__secondary_start@h
-	ori	r5,r5,__secondary_start@l
-	tophys(r5,r5)
-	mtlr	r5
-	mr	r24,r3			/* cpu # */
-	blr
-#endif /* CONFIG_SMP */
-	
 /*
  * This is where the main kernel code starts.
  */
 start_here:
-#ifdef CONFIG_SMP
-	/* if we're the second cpu stack and r2 are different
-	* and we want to not clear the bss -- Cort */
-	lis	r5,first_cpu_booted@h
-	ori	r5,r5,first_cpu_booted@l
-	lwz	r5,0(r5)
-	cmpi	0,r5,0
-	beq	99f
-
-	/* get current */
-	lis	r2,current_set@h
-	ori	r2,r2,current_set@l
-	slwi	r24,r24,2			/* cpu # to current_set[cpu#] */
-	add	r2,r2,r24
-	lwz	r2,0(r2)
-	b	10f
-99:	
-#endif /* CONFIG_SMP */
 	/* ptr to current */
-	lis	r2,init_task_union@h
-	ori	r2,r2,init_task_union@l
-	/* Clear out the BSS */
-	lis	r11,_end@ha
-	addi	r11,r11,_end@l
-	lis	r8,__bss_start@ha
-	addi	r8,r8,__bss_start@l
-	subf	r11,r8,r11
-	addi	r11,r11,3
-	rlwinm.	r11,r11,30,2,31
-	beq	2f
-	addi	r8,r8,-4
-	mtctr	r11
-	li	r0,0
-3:	stwu	r0,4(r8)
-	bdnz	3b
-2:
-#ifdef CONFIG_SMP	
-10:
-#endif /* CONFIG_SMP */
+	lis	r2,init_task@h
+	ori	r2,r2,init_task@l
+
+	/* ptr to phys current thread */
+	tophys(r4,r2)
+	addi	r4,r4,THREAD	/* init task's THREAD */
+	mtspr	SPRG3,r4
+	li	r3,0
+	mtspr	SPRG2,r3	/* 0 => r1 has kernel sp */
+
 	/* stack */
-	addi	r1,r2,TASK_UNION_SIZE
+	lis	r1,init_thread_union@ha
+	addi	r1,r1,init_thread_union@l
 	li	r0,0
-	stwu	r0,-STACK_FRAME_OVERHEAD(r1)
+	stwu	r0,THREAD_SIZE-STACK_FRAME_OVERHEAD(r1)
+
+	bl	early_init	/* We have to do this with MMU on */
+
 /*
  * Decide what sort of machine this is and initialize the MMU.
  */
@@ -857,12 +674,11 @@ start_here:
 	mr	r5,r29
 	mr	r6,r28
 	mr	r7,r27
-	bl	identify_machine
+	bl	machine_init
 	bl	MMU_init
 
 /*
  * Go back to running unmapped so we can load up new values
- * for SDR1 (hash table pointer) and the segment registers
  * and change to using our exception vectors.
  * On the 8xx, all we have to do is invalidate the TLB to clear
  * the old 8M byte TLB mappings and load the page table base register.
@@ -872,8 +688,8 @@ start_here:
 	 * easier......until someone changes init's static structures.
 	 */
 	lis	r6, swapper_pg_dir@h
-	tophys(r6,r6)
 	ori	r6, r6, swapper_pg_dir@l
+	tophys(r6,r6)
 #ifdef CONFIG_8xx_CPU6
 	lis	r4, cpu6_errata_word@h
 	ori	r4, r4, cpu6_errata_word@l
@@ -894,59 +710,160 @@ start_here:
 	SYNC			/* Force all PTE updates to finish */
 	tlbia			/* Clear all TLB entries */
 	sync			/* wait for tlbia/tlbie to finish */
-#ifdef CONFIG_SMP
-	tlbsync			/* ... on all CPUs */
-	sync
-#endif
-/* Set up for using our exception vectors */
-	/* ptr to phys current thread */
-	tophys(r4,r2)
-	addi	r4,r4,THREAD	/* init task's THREAD */
-	mtspr	SPRG3,r4
-	li	r3,0
-	mtspr	SPRG2,r3	/* 0 => r1 has kernel sp */
+	TLBSYNC			/* ... on all CPUs */
+
+	/* set up the PTE pointers for the Abatron bdiGDB.
+	*/
+	tovirt(r6,r6)
+	lis	r5, abatron_pteptrs@h
+	ori	r5, r5, abatron_pteptrs@l
+	stw	r5, 0xf0(r0)	/* Must match your Abatron config file */
+	tophys(r5,r5)
+	stw	r6, 0(r5)
+
 /* Now turn on the MMU for real! */
 	li	r4,MSR_KERNEL
 	lis	r3,start_kernel@h
 	ori	r3,r3,start_kernel@l
-#ifdef CONFIG_SMP
-	/* the second time through here we go to
-	 * start_secondary(). -- Cort
-	 */
-	lis	r5,first_cpu_booted@h
-	ori	r5,r5,first_cpu_booted@l
-	tophys(r5,r5)
-	lwz	r5,0(r5)
-	cmpi	0,r5,0
-	beq	10f
-	lis	r3,start_secondary@h
-	ori	r3,r3,start_secondary@l
-10:	
-#endif /* CONFIG_SMP */
 	mtspr	SRR0,r3
 	mtspr	SRR1,r4
 	rfi			/* enable MMU and jump to start_kernel */
 
+/* Set up the initial MMU state so we can do the first level of
+ * kernel initialization.  This maps the first 8 MBytes of memory 1:1
+ * virtual to physical.  Also, set the cache mode since that is defined
+ * by TLB entries and perform any additional mapping (like of the IMMR).
+ * If configured to pin some TLBs, we pin the first 8 Mbytes of kernel,
+ * 24 Mbytes of data, and the 8M IMMR space.  Anything not covered by
+ * these mappings is mapped by page tables.
+ */
+initial_mmu:
+	tlbia			/* Invalidate all TLB entries */
+#ifdef CONFIG_PIN_TLB
+	lis	r8, MI_RSV4I@h
+	ori	r8, r8, 0x1c00
+#else
+	li	r8, 0
+#endif
+	mtspr	MI_CTR, r8	/* Set instruction MMU control */
+
+#ifdef CONFIG_PIN_TLB
+	lis	r10, (MD_RSV4I | MD_RESETVAL)@h
+	ori	r10, r10, 0x1c00
+	mr	r8, r10
+#else
+	lis	r10, MD_RESETVAL@h
+#endif
+#ifndef CONFIG_8xx_COPYBACK
+	oris	r10, r10, MD_WTDEF@h
+#endif
+	mtspr	MD_CTR, r10	/* Set data TLB control */
+
+	/* Now map the lower 8 Meg into the TLBs.  For this quick hack,
+	 * we can load the instruction and data TLB registers with the
+	 * same values.
+	 */
+	lis	r8, KERNELBASE@h	/* Create vaddr for TLB */
+	ori	r8, r8, MI_EVALID	/* Mark it valid */
+	mtspr	MI_EPN, r8
+	mtspr	MD_EPN, r8
+	li	r8, MI_PS8MEG		/* Set 8M byte page */
+	ori	r8, r8, MI_SVALID	/* Make it valid */
+	mtspr	MI_TWC, r8
+	mtspr	MD_TWC, r8
+	li	r8, MI_BOOTINIT		/* Create RPN for address 0 */
+	mtspr	MI_RPN, r8		/* Store TLB entry */
+	mtspr	MD_RPN, r8
+	lis	r8, MI_Kp@h		/* Set the protection mode */
+	mtspr	MI_AP, r8
+	mtspr	MD_AP, r8
+
+	/* Map another 8 MByte at the IMMR to get the processor
+	 * internal registers (among other things).
+	 */
+#ifdef CONFIG_PIN_TLB
+	addi	r10, r10, 0x0100
+	mtspr	MD_CTR, r10
+#endif
+	mfspr	r9, 638			/* Get current IMMR */
+	andis.	r9, r9, 0xff80		/* Get 8Mbyte boundary */
+
+	mr	r8, r9			/* Create vaddr for TLB */
+	ori	r8, r8, MD_EVALID	/* Mark it valid */
+	mtspr	MD_EPN, r8
+	li	r8, MD_PS8MEG		/* Set 8M byte page */
+	ori	r8, r8, MD_SVALID	/* Make it valid */
+	mtspr	MD_TWC, r8
+	mr	r8, r9			/* Create paddr for TLB */
+	ori	r8, r8, MI_BOOTINIT|0x2 /* Inhibit cache -- Cort */
+	mtspr	MD_RPN, r8
+
+#ifdef CONFIG_PIN_TLB
+	/* Map two more 8M kernel data pages.
+	*/
+	addi	r10, r10, 0x0100
+	mtspr	MD_CTR, r10
+
+	lis	r8, KERNELBASE@h	/* Create vaddr for TLB */
+	addis	r8, r8, 0x0080		/* Add 8M */
+	ori	r8, r8, MI_EVALID	/* Mark it valid */
+	mtspr	MD_EPN, r8
+	li	r9, MI_PS8MEG		/* Set 8M byte page */
+	ori	r9, r9, MI_SVALID	/* Make it valid */
+	mtspr	MD_TWC, r9
+	li	r11, MI_BOOTINIT	/* Create RPN for address 0 */
+	addis	r11, r11, 0x0080	/* Add 8M */
+	mtspr	MD_RPN, r8
+
+	addis	r8, r8, 0x0080		/* Add 8M */
+	mtspr	MD_EPN, r8
+	mtspr	MD_TWC, r9
+	addis	r11, r11, 0x0080	/* Add 8M */
+	mtspr	MD_RPN, r8
+#endif
+
+	/* Since the cache is enabled according to the information we
+	 * just loaded into the TLB, invalidate and enable the caches here.
+	 * We should probably check/set other modes....later.
+	 */
+	lis	r8, IDC_INVALL@h
+	mtspr	IC_CST, r8
+	mtspr	DC_CST, r8
+	lis	r8, IDC_ENABLE@h
+	mtspr	IC_CST, r8
+#ifdef CONFIG_8xx_COPYBACK
+	mtspr	DC_CST, r8
+#else
+	/* For a debug option, I left this here to easily enable
+	 * the write through cache mode
+	 */
+	lis	r8, DC_SFWT@h
+	mtspr	DC_CST, r8
+	lis	r8, IDC_ENABLE@h
+	mtspr	DC_CST, r8
+#endif
+	blr
+
+
 /*
  * Set up to use a given MMU context.
+ * r3 is context number, r4 is PGD pointer.
  *
- * The MPC8xx has something that currently happens "automagically."
- * Unshared user space address translations are subject to ASID (context)
- * match.  During each task switch, the ASID is incremented.  We can
- * guarantee (I hope :-) that no entries currently match this ASID
- * because every task will cause at least a TLB entry to be loaded for
- * the first instruction and data access, plus the kernel running will
- * have displaced several more TLBs.  The MMU contains 32 entries for
- * each TLB, and there are 16 contexts, so we just need to make sure
- * two pages get replaced for every context switch, which currently
- * happens.  There are other TLB management techniques that I will
- * eventually implement, but this is the easiest for now.  -- Dan
- *
- * On the MPC8xx, we place the physical address of the new task
- * page directory loaded into the MMU base register, and set the
- * ASID compare register with the new "context".
+ * We place the physical address of the new task page directory loaded
+ * into the MMU base register, and set the ASID compare register with
+ * the new "context."
  */
 _GLOBAL(set_context)
+
+#ifdef CONFIG_BDI_SWITCH
+	/* Context switch the PTE pointer for the Abatron BDI2000.
+	 * The PGDIR is passed as second argument.
+	 */
+	lis	r5, KERNELBASE@h
+	lwz	r5, 0xf0(r5)
+	stw	r4, 0x4(r5)
+#endif
+
 #ifdef CONFIG_8xx_CPU6
 	lis	r6, cpu6_errata_word@h
 	ori	r6, r6, cpu6_errata_word@l
@@ -964,29 +881,8 @@ _GLOBAL(set_context)
 	tophys	(r4, r4)
 	mtspr	M_TWB, r4		/* and pgd */
 #endif
-        tlbia
 	SYNC
 	blr
-
-/* Jump into the system reset for the rom.
- * We first disable the MMU, and then jump to the ROM reset address.
- *
- * r3 is the board info structure, r4 is the location for starting.
- * I use this for building a small kernel that can load other kernels,
- * rather than trying to write or rely on a rom monitor that can tftp load.
- */
-       .globl  m8xx_gorom
-m8xx_gorom:
-       li      r5,MSR_KERNEL & ~(MSR_IR|MSR_DR)
-       lis     r6,2f@h
-       addis   r6,r6,-KERNELBASE@h
-       ori     r6,r6,2f@l
-       mtspr   SRR0,r6
-       mtspr   SRR1,r5
-       rfi
-2:
-       mtlr    r4
-       blr
 
 #ifdef CONFIG_8xx_CPU6
 /* It's here because it is unique to the 8xx.
@@ -1005,7 +901,7 @@ set_dec_cpu6:
 	SYNC
 	blr
 #endif
-	
+
 /*
  * We put a few things here that have to be page-aligned.
  * This stuff goes at the beginning of the data segment,
@@ -1020,15 +916,21 @@ empty_zero_page:
 
 	.globl	swapper_pg_dir
 swapper_pg_dir:
-	.space	4096	
+	.space	4096
 
 /*
  * This space gets a copy of optional info passed to us by the bootstrap
  * Used to pass parameters into the kernel like root=/dev/sda1, etc.
- */	
+ */
 	.globl	cmd_line
 cmd_line:
 	.space	512
+
+/* Room for two PTE table poiners, usually the kernel and current user
+ * pointer to their respective root page table (pgdir).
+ */
+abatron_pteptrs:
+	.space	8
 
 #ifdef CONFIG_8xx_CPU6
 	.globl	cpu6_errata_word

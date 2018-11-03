@@ -26,14 +26,11 @@
 
 #include <linux/errno.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
-#include <asm/segment.h>
+#include <linux/slab.h>
 
 #include <linux/zftape.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,0)
 #include <linux/vmalloc.h>
-#endif
 
 #include "../zftape/zftape-init.h"
 #include "../zftape/zftape-eof.h"

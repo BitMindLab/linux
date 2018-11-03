@@ -2,7 +2,7 @@
  * linux/fs/hfs/binsert.c
  *
  * Copyright (C) 1995-1997  Paul H. Hargrove
- * This file may be distributed under the terms of the GNU Public License.
+ * This file may be distributed under the terms of the GNU General Public License.
  *
  * This file contains the code to insert records in a B-tree.
  *
@@ -16,21 +16,6 @@
 #include "hfs_btree.h"
 
 /*================ File-local functions ================*/
-
-/* btree locking functions */
-static inline void hfs_btree_lock(struct hfs_btree *tree)
-{
-  while (tree->lock) 
-    hfs_sleep_on(&tree->wait);
-  tree->lock = 1;
-}
-
-static inline void hfs_btree_unlock(struct hfs_btree *tree)
-{
-  tree->lock = 0;
-  hfs_wake_up(&tree->wait);
-}
-
 /*
  * binsert_nonfull()
  *
@@ -526,11 +511,11 @@ restart:
 		/* make certain we have enough nodes to proceed */
 		if ((tree->bthFree - tree->reserved) < reserve) {
 			hfs_brec_relse(&brec, NULL);
-			hfs_btree_lock(tree);
+			down(&tree->sem);
 			if ((tree->bthFree - tree->reserved) < reserve) {
 				hfs_btree_extend(tree);
 			}
-			hfs_btree_unlock(tree);
+			up(&tree->sem);
 			if ((tree->bthFree - tree->reserved) < reserve) {
 				return -ENOSPC;
 			} else {

@@ -4,13 +4,41 @@
 
 #include <linux/config.h>
 #include <asm/machdep.h>		/* ppc_md */
+#include <asm/atomic.h>
 
 extern void disable_irq(unsigned int);
 extern void disable_irq_nosync(unsigned int);
 extern void enable_irq(unsigned int);
 
-#if defined(CONFIG_4xx)
+/*
+ * These constants are used for passing information about interrupt
+ * signal polarity and level/edge sensing to the low-level PIC chip
+ * drivers.
+ */
+#define IRQ_SENSE_MASK		0x1
+#define IRQ_SENSE_LEVEL		0x1	/* interrupt on active level */
+#define IRQ_SENSE_EDGE		0x0	/* interrupt triggered by edge */
 
+#define IRQ_POLARITY_MASK	0x2
+#define IRQ_POLARITY_POSITIVE	0x2	/* high level or low->high edge */
+#define IRQ_POLARITY_NEGATIVE	0x0	/* low level or high->low edge */
+
+#if defined(CONFIG_40x)
+#include <asm/ibm4xx.h>
+
+#ifndef NR_BOARD_IRQS
+#define NR_BOARD_IRQS 0
+#endif
+
+#ifndef UIC_WIDTH /* Number of interrupts per device */
+#define UIC_WIDTH 32
+#endif
+
+#ifndef NR_UICS /* number  of UIC devices */
+#define NR_UICS 1
+#endif
+
+#if defined (CONFIG_403)
 /*
  * The PowerPC 403 cores' Asynchronous Interrupt Controller (AIC) has
  * 32 possible interrupts, a majority of which are not implemented on
@@ -18,33 +46,39 @@ extern void enable_irq(unsigned int);
  * there are eight internal interrupts for the on-chip serial port
  * (SPU), DMA controller, and JTAG controller.
  *
- * The PowerPC 405 cores' Universal Interrupt Controller (UIC) has 32
+ */
+
+#define	NR_AIC_IRQS 32
+#define	NR_IRQS	 (NR_AIC_IRQS + NR_BOARD_IRQS)
+
+#elif !defined (CONFIG_403)
+
+/*
+ *  The PowerPC 405 cores' Universal Interrupt Controller (UIC) has 32
  * possible interrupts as well. There are seven, configurable external
  * interrupt pins and there are 17 internal interrupts for the on-chip
  * serial port, DMA controller, on-chip Ethernet controller, PCI, etc.
  *
  */
 
-#define	NR_IRQS		32
 
-#define	AIC_INT0	(0)
-#define	AIC_INT4	(4)
-#define	AIC_INT5	(5)
-#define	AIC_INT6	(6)
-#define	AIC_INT7	(7)
-#define	AIC_INT8	(8)
-#define	AIC_INT9	(9)
-#define	AIC_INT10	(10)
-#define	AIC_INT11	(11)
-#define	AIC_INT27	(27)
-#define	AIC_INT28	(28)
-#define	AIC_INT29	(29)
-#define	AIC_INT30	(30)
-#define	AIC_INT31	(31)
+#define NR_UIC_IRQS UIC_WIDTH
+#define NR_IRQS		((NR_UIC_IRQS * NR_UICS) + NR_BOARD_IRQS)
+#endif
+static __inline__ int
+irq_canonicalize(int irq)
+{
+	return (irq);
+}
 
+#elif defined(CONFIG_44x)
+#include <asm/ibm44x.h>
+
+#define	NR_UIC_IRQS	32
+#define	NR_IRQS		((NR_UIC_IRQS * NR_UICS) + NR_BOARD_IRQS)
 
 static __inline__ int
-irq_cannonicalize(int irq)
+irq_canonicalize(int irq)
 {
 	return (irq);
 }
@@ -55,7 +89,7 @@ irq_cannonicalize(int irq)
  * possible level sensitive interrupts assigned and generated internally
  * from such devices as CPM, PCMCIA, RTC, PIT, TimeBase and Decrementer.
  * There are eight external interrupts (IRQs) that can be configured
- * as either level or edge sensitive. 
+ * as either level or edge sensitive.
  *
  * On some implementations, there is also the possibility of an 8259
  * through the PCI and PCI-ISA bridges.
@@ -87,73 +121,39 @@ irq_cannonicalize(int irq)
 #define	SIU_IRQ7	(14)
 #define	SIU_LEVEL7	(15)
 
+/* Now include the board configuration specific associations.
+*/
+#include <asm/mpc8xx.h>
+
 /* The internal interrupts we can configure as we see fit.
  * My personal preference is CPM at level 2, which puts it above the
  * MBX PCI/ISA/IDE interrupts.
  */
+#ifndef PIT_INTERRUPT
 #define PIT_INTERRUPT		SIU_LEVEL0
+#endif
+#ifndef	CPM_INTERRUPT
 #define CPM_INTERRUPT		SIU_LEVEL2
+#endif
+#ifndef	PCMCIA_INTERRUPT
 #define PCMCIA_INTERRUPT	SIU_LEVEL6
+#endif
+#ifndef	DEC_INTERRUPT
 #define DEC_INTERRUPT		SIU_LEVEL7
+#endif
 
 /* Some internal interrupt registers use an 8-bit mask for the interrupt
  * level instead of a number.
  */
 #define	mk_int_int_mask(IL) (1 << (7 - (IL/2)))
 
-/* Now include the board configuration specific associations.
-*/
-#include <asm/mpc8xx.h>
-
 /* always the same on 8xx -- Cort */
-static __inline__ int irq_cannonicalize(int irq)
+static __inline__ int irq_canonicalize(int irq)
 {
 	return irq;
 }
 
-#else /* CONFIG_4xx + CONFIG_8xx */
-
-#if defined(CONFIG_APUS)
-/*
- * This structure is used to chain together the ISRs for a particular
- * interrupt source (if it supports chaining).
- */
-typedef struct irq_node {
-	void		(*handler)(int, void *, struct pt_regs *);
-	unsigned long	flags;
-	void		*dev_id;
-	const char	*devname;
-	struct irq_node *next;
-} irq_node_t;
-
-/*
- * This structure has only 4 elements for speed reasons
- */
-typedef struct irq_handler {
-	void		(*handler)(int, void *, struct pt_regs *);
-	unsigned long	flags;
-	void		*dev_id;
-	const char	*devname;
-} irq_handler_t;
-
-/* count of spurious interrupts */
-extern volatile unsigned int num_spurious;
-
-extern int sys_request_irq(unsigned int, 
-	void (*)(int, void *, struct pt_regs *), 
-	unsigned long, const char *, void *);
-extern void sys_free_irq(unsigned int, void *);
-
-/*
- * This function returns a new irq_node_t
- */
-extern irq_node_t *new_irq_node(void);
-
-/* Number of m68k interrupts */
-#define SYS_IRQS 8
-
-#endif /* CONFIG_APUS */
-
+#else /* CONFIG_40x + CONFIG_8xx */
 /*
  * this is the # irq's for all ppc arch's (pmac/chrp/prep)
  * so it is the max of them all
@@ -163,9 +163,6 @@ extern irq_node_t *new_irq_node(void);
 #ifndef CONFIG_8260
 
 #define NUM_8259_INTERRUPTS	16
-#define IRQ_8259_CASCADE	16
-#define openpic_to_irq(n)	((n)+NUM_8259_INTERRUPTS)
-#define irq_to_openpic(n)	((n)-NUM_8259_INTERRUPTS)
 
 #else /* CONFIG_8260 */
 
@@ -199,22 +196,20 @@ extern irq_node_t *new_irq_node(void);
  * powermacs as well as prep/chrp boxes.
  * Prep and chrp both have cascaded 8259 PICs.
  */
-static __inline__ int irq_cannonicalize(int irq)
+static __inline__ int irq_canonicalize(int irq)
 {
-	if (ppc_md.irq_cannonicalize)
-	{
-		return ppc_md.irq_cannonicalize(irq);
-	}
-	else
-	{
-		return irq;
-	}
+	if (ppc_md.irq_canonicalize)
+		return ppc_md.irq_canonicalize(irq);
+	return irq;
 }
 
 #endif
 
 #define NR_MASK_WORDS	((NR_IRQS + 31) / 32)
-extern unsigned int ppc_lost_interrupts[NR_MASK_WORDS];
+/* pedantic: these are long because they are used with set_bit --RR */
+extern unsigned long ppc_cached_irq_mask[NR_MASK_WORDS];
+extern unsigned long ppc_lost_interrupts[NR_MASK_WORDS];
+extern atomic_t ppc_n_lost_interrupts;
 
 #endif /* _ASM_IRQ_H */
 #endif /* __KERNEL__ */

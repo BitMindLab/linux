@@ -1,4 +1,3 @@
-
 /*
  * MPC8260 Communication Processor Module.
  * Copyright (c) 1999 Dan Malek (dmalek@jlc.net)
@@ -112,7 +111,7 @@ typedef struct cpm_buf_desc {
 	uint	cbd_bufaddr;	/* Buffer address in host memory */
 } cbd_t;
 
-#define BD_SC_EMPTY	((ushort)0x8000)	/* Recieve is empty */
+#define BD_SC_EMPTY	((ushort)0x8000)	/* Receive is empty */
 #define BD_SC_READY	((ushort)0x8000)	/* Transmit is ready */
 #define BD_SC_WRAP	((ushort)0x2000)	/* Last buffer descriptor */
 #define BD_SC_INTRPT	((ushort)0x1000)	/* Interrupt on change */
@@ -196,7 +195,7 @@ typedef struct smc_uart {
 
 /* SMC uart mode register (Internal memory map).
 */
-#define	SMCMR_REN	((ushort)0x0001)
+#define SMCMR_REN	((ushort)0x0001)
 #define SMCMR_TEN	((ushort)0x0002)
 #define SMCMR_DM	((ushort)0x000c)
 #define SMCMR_SM_GCI	((ushort)0x0000)
@@ -213,10 +212,12 @@ typedef struct smc_uart {
 
 /* SMC Event and Mask register.
 */
-#define	SMCM_TXE	((unsigned char)0x10)
-#define	SMCM_BSY	((unsigned char)0x04)
-#define	SMCM_TX		((unsigned char)0x02)
-#define	SMCM_RX		((unsigned char)0x01)
+#define SMCM_BRKE       ((unsigned char)0x40)   /* When in UART Mode */
+#define SMCM_BRK        ((unsigned char)0x10)   /* When in UART Mode */
+#define SMCM_TXE	((unsigned char)0x10)
+#define SMCM_BSY	((unsigned char)0x04)
+#define SMCM_TX		((unsigned char)0x02)
+#define SMCM_RX		((unsigned char)0x01)
 
 /* Baud rate generators.
 */
@@ -315,10 +316,10 @@ typedef struct smc_uart {
 
 /* SCC Event and Mask register.
 */
-#define	SCCM_TXE	((unsigned char)0x10)
-#define	SCCM_BSY	((unsigned char)0x04)
-#define	SCCM_TX		((unsigned char)0x02)
-#define	SCCM_RX		((unsigned char)0x01)
+#define SCCM_TXE	((unsigned char)0x10)
+#define SCCM_BSY	((unsigned char)0x04)
+#define SCCM_TX		((unsigned char)0x02)
+#define SCCM_RX		((unsigned char)0x01)
 
 typedef struct scc_param {
 	ushort	scc_rbase;	/* Rx Buffer descriptor base address */

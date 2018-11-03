@@ -22,13 +22,8 @@
 #define IRNET_MAJOR	10	/* Misc range */
 #define IRNET_MINOR	187	/* Official allocation */
 
-#ifdef LINKNAME_IOCTL
-/* Compatibility with old ppp drivers
- * Should be defined in <linux/if_ppp.h> */
-#ifndef PPPIOCSLINKNAME
-#define PPPIOCSLINKNAME	_IOW('t', 74, struct ppp_option_data)
-#endif PPPIOCSLINKNAME
-#endif LINKNAME_IOCTL
+/* IrNET control channel stuff */
+#define IRNET_MAX_COMMAND	256	/* Max length of a command line */
 
 /* PPP hardcore stuff */
 
@@ -103,12 +98,13 @@ static int
 /* Filesystem callbacks (to call us) */
 static struct file_operations irnet_device_fops =
 {
-  read:		dev_irnet_read,
-  write:	dev_irnet_write,
-  poll:		dev_irnet_poll,
-  ioctl:	dev_irnet_ioctl,
-  open:		dev_irnet_open,
-  release:	dev_irnet_close
+	.owner		= THIS_MODULE,
+	.read		= dev_irnet_read,
+	.write		= dev_irnet_write,
+	.poll		= dev_irnet_poll,
+	.ioctl		= dev_irnet_ioctl,
+	.open		= dev_irnet_open,
+	.release	= dev_irnet_close
   /* Also : llseek, readdir, mmap, flush, fsync, fasync, lock, readv, writev */
 };
 
@@ -127,4 +123,4 @@ struct ppp_channel_ops irnet_ppp_ops =
   ppp_irnet_ioctl
 };
 
-#endif IRNET_PPP_H
+#endif /* IRNET_PPP_H */

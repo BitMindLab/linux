@@ -71,49 +71,40 @@
  *	  into the kernel.
  *	- Better handling of multicast addresses.
  *
+ *	Fixes:
+ *	Arnaldo Carvalho de Melo <acme@conectiva.com.br> - 11/01/2001
+ *	- fix dgrs_found_device wrt checking kmalloc return and
+ *	rollbacking the partial steps of the whole process when
+ *	one of the devices can't be allocated. Fix SET_MODULE_OWNER
+ *	on the loop to use devN instead of repeated calls to dev.
+ *
+ *	davej <davej@suse.de> - 9/2/2001
+ *	- Enable PCI device before reading ioaddr/irq
+ *
  */
 
-static char *version = "$Id: dgrs.c,v 1.13 2000/06/06 04:07:00 rick Exp $";
-
-#include <linux/version.h>
 #include <linux/module.h>
-
+#include <linux/eisa.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/init.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/byteorder.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 
-#include <linux/types.h>
+#include <asm/bitops.h>
+#include <asm/io.h>
+#include <asm/byteorder.h>
+#include <asm/uaccess.h>
 
-/*
- *	API changed at linux version 2.1.0
- */
-#if LINUX_VERSION_CODE >= 0x20100
-	#include <asm/uaccess.h>
-	#define IOREMAP(ADDR, LEN)		ioremap(ADDR, LEN)
-	#define IOUNMAP(ADDR)			iounmap(ADDR)
-	#define COPY_FROM_USER(DST,SRC,LEN)	copy_from_user(DST,SRC,LEN)
-	#define COPY_TO_USER(DST,SRC,LEN)	copy_to_user(DST,SRC,LEN)
-#else
-	#include <linux/bios32.h>
-	#define IOREMAP(ADDR, LEN)		vremap(ADDR, LEN)
-	#define IOUNMAP(ADDR)			vfree(ADDR)
-	#define COPY_FROM_USER(DST,SRC,LEN)	memcpy_fromfs(DST,SRC,LEN)
-	#define COPY_TO_USER(DST,SRC,LEN)	memcpy_tofs(DST,SRC,LEN)
-#endif
+static char version[] __initdata =
+	"$Id: dgrs.c,v 1.13 2000/06/06 04:07:00 rick Exp $";
 
 /*
  *	DGRS include files
@@ -130,13 +121,13 @@ typedef unsigned int bool;
 #include "dgrs_asstruct.h"
 #include "dgrs_bcomm.h"
 
-#if LINUX_VERSION_CODE >= 0x20400
-static struct pci_device_id dgrs_pci_tbl[] __initdata = {
+static struct pci_device_id dgrs_pci_tbl[] = {
 	{ SE6_PCI_VENDOR_ID, SE6_PCI_DEVICE_ID, PCI_ANY_ID, PCI_ANY_ID, },
 	{ }			/* Terminating entry */
 };
 MODULE_DEVICE_TABLE(pci, dgrs_pci_tbl);
-#endif /* LINUX_VERSION_CODE >= 0x20400 */
+MODULE_LICENSE("GPL");
+
 
 /*
  *	Firmware.  Compiled separately for local compilation,
@@ -178,19 +169,19 @@ MODULE_DEVICE_TABLE(pci, dgrs_pci_tbl);
  *	"Space.c" variables, now settable from module interface
  *	Use the name below, minus the "dgrs_" prefix.  See init_module().
  */
-int	dgrs_debug = 1;
-int	dgrs_dma = 1;
-int	dgrs_spantree = -1;
-int	dgrs_hashexpire = -1;
-uchar	dgrs_ipaddr[4] = { 0xff, 0xff, 0xff, 0xff};
-uchar	dgrs_iptrap[4] = { 0xff, 0xff, 0xff, 0xff};
-__u32	dgrs_ipxnet = -1;
-int	dgrs_nicmode = 0;
+static int	dgrs_debug = 1;
+static int	dgrs_dma = 1;
+static int	dgrs_spantree = -1;
+static int	dgrs_hashexpire = -1;
+static uchar	dgrs_ipaddr[4] = { 0xff, 0xff, 0xff, 0xff};
+static uchar	dgrs_iptrap[4] = { 0xff, 0xff, 0xff, 0xff};
+static __u32	dgrs_ipxnet = -1;
+static int	dgrs_nicmode;
 
 /*
  *	Chain of device structures
  */
-static struct net_device *dgrs_root_dev = NULL;
+static struct net_device *dgrs_root_dev;
 
 /*
  *	Private per-board data structure (dev->priv)
@@ -284,7 +275,7 @@ check_board_dma(struct net_device *dev0)
 	ulong	x;
 
 	/*
-	 *	If Space.c says not to use DMA, or if its not a PLX based
+	 *	If Space.c says not to use DMA, or if it's not a PLX based
 	 *	PCI board, or if the expansion ROM space is not PCI
 	 *	configured, then return false.
 	 */
@@ -316,7 +307,7 @@ check_board_dma(struct net_device *dev0)
 	/*
 	 *	Now map the DMA registers into our virtual space
 	 */
-	priv0->vplxdma = (ulong *) IOREMAP (priv0->plxdma, 256);
+	priv0->vplxdma = (ulong *) ioremap (priv0->plxdma, 256);
 	if (!priv0->vplxdma)
 	{
 		printk("%s: can't *remap() the DMA regs\n", dev0->name);
@@ -341,10 +332,10 @@ check_board_dma(struct net_device *dev0)
  *	Initiate DMA using PLX part on PCI board.  Spin the
  *	processor until completed.  All addresses are physical!
  *
- *	If pciaddr is NULL, then its a chaining DMA, and lcladdr is
+ *	If pciaddr is NULL, then it's a chaining DMA, and lcladdr is
  *	the address of the first DMA descriptor in the chain.
  *
- *	If pciaddr is not NULL, then its a single DMA.
+ *	If pciaddr is not NULL, then it's a single DMA.
  *
  *	In either case, "lcladdr" must have been fixed up to make
  *	sure the MSB isn't set using the S2DMA macro before passing
@@ -521,7 +512,7 @@ again:
 	if (priv0->use_dma && priv0->dmadesc_h && len > 64)
 	{
 		/*
-		 *	If we can use DMA and its a long frame, copy it using
+		 *	If we can use DMA and it's a long frame, copy it using
 		 *	DMA chaining.
 		 */
 		DMACHAIN	*ddp_h;	/* Host virtual DMA desc. pointer */
@@ -549,7 +540,7 @@ again:
 				break; /* For safety */
 			if ( (p-putp) >= len)
 			{
-				printk("%s: cbp = %x\n", devN->name, H2S(cbp));
+				printk("%s: cbp = %lx\n", devN->name, (long) H2S(cbp));
 				proc_reset(dev0, 1);	/* Freeze IDT */
 				break; /* For Safety */
 			}
@@ -593,7 +584,7 @@ again:
 	else if (priv0->use_dma)
 	{
 		/*
-		 *	If we can use DMA and its a shorter frame, copy it
+		 *	If we can use DMA and it's a shorter frame, copy it
 		 *	using single DMA transfers.
 		 */
 		uchar		*phys_p;
@@ -618,7 +609,7 @@ again:
 				break; /* For safety */
 			if ( (p-putp) >= len)
 			{
-				printk("%s: cbp = %x\n", devN->name, H2S(cbp));
+				printk("%s: cbp = %lx\n", devN->name, (long) H2S(cbp));
 				proc_reset(dev0, 1);	/* Freeze IDT */
 				break; /* For Safety */
 			}
@@ -653,7 +644,7 @@ again:
 				break; /* For safety */
 			if ( (p-putp) >= len)
 			{
-				printk("%s: cbp = %x\n", devN->name, H2S(cbp));
+				printk("%s: cbp = %lx\n", devN->name, (long) H2S(cbp));
 				proc_reset(dev0, 1);	/* Freeze IDT */
 				break; /* For Safety */
 			}
@@ -670,7 +661,9 @@ again:
 	 */
 	skb->protocol = eth_type_trans(skb, devN);
 	netif_rx(skb);
+	devN->last_rx = jiffies;
 	++privN->stats.rx_packets;
+	privN->stats.rx_bytes += len;
 
 out:
 	cbp->xmit.status = I596_CB_STATUS_C | I596_CB_STATUS_OK;
@@ -702,7 +695,6 @@ static int dgrs_start_xmit(struct sk_buff *skb, struct net_device *devN)
 	I596_RBD	*rbdp;
 	int		count;
 	int		i, len, amt;
-#	define		mymin(A,B)	( (A) < (B) ? (A) : (B) )
 
 	/*
 	 *	Determine 0th priv and dev structure pointers
@@ -743,7 +735,7 @@ static int dgrs_start_xmit(struct sk_buff *skb, struct net_device *devN)
 			goto no_resources;
 		}
 
-		amt = mymin(len, rbdp->size - count);
+		amt = min_t(unsigned int, len, rbdp->size - count);
 		memcpy( (char *) S2H(rbdp->buf) + count, skb->data + i, amt);
 		i += amt;
 		count += amt;
@@ -841,7 +833,7 @@ static int dgrs_ioctl(struct net_device *devN, struct ifreq *ifr, int cmd)
 	if (cmd != DGRSIOCTL)
 		return -EINVAL;
 
-	if(COPY_FROM_USER(&ioc, ifr->ifr_data, sizeof(DGRS_IOCTL)))
+	if(copy_from_user(&ioc, ifr->ifr_data, sizeof(DGRS_IOCTL)))
 		return -EFAULT;
 
 	switch (ioc.cmd)
@@ -849,7 +841,7 @@ static int dgrs_ioctl(struct net_device *devN, struct ifreq *ifr, int cmd)
 		case DGRS_GETMEM:
 			if (ioc.len != sizeof(ulong))
 				return -EINVAL;
-			if(COPY_TO_USER(ioc.data, &devN->mem_start, ioc.len))
+			if(copy_to_user(ioc.data, &devN->mem_start, ioc.len))
 				return -EFAULT;
 			return (0);
 		case DGRS_SETFILTER:
@@ -878,7 +870,7 @@ static int dgrs_ioctl(struct net_device *devN, struct ifreq *ifr, int cmd)
 	
 			if (ioc.len)
 			{
-				if(COPY_FROM_USER(S2HN(privN->bcomm->bc_filter_area),
+				if(copy_from_user(S2HN(privN->bcomm->bc_filter_area),
 					ioc.data, ioc.len))
 					return -EFAULT;
 				privN->bcomm->bc_filter_cmd = BC_FILTER_SET;
@@ -897,7 +889,7 @@ static int dgrs_ioctl(struct net_device *devN, struct ifreq *ifr, int cmd)
  *	dev, priv will always refer to the 0th device in Multi-NIC mode.
  */
 
-static void dgrs_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t dgrs_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device	*dev0 = (struct net_device *) dev_id;
 	DGRS_PRIV	*priv0 = (DGRS_PRIV *) dev0->priv;
@@ -980,6 +972,8 @@ static void dgrs_intr(int irq, void *dev_id, struct pt_regs *regs)
 ack_intr:
 	if (priv0->plxreg)
 		OUTL(dev0->base_addr + PLX_LCL2PCI_DOORBELL, 1);
+
+	return IRQ_HANDLED;
 }
 
 /*
@@ -990,7 +984,7 @@ dgrs_download(struct net_device *dev0)
 {
 	DGRS_PRIV	*priv0 = (DGRS_PRIV *) dev0->priv;
 	int		is;
-	int		i;
+	unsigned long	i;
 
 	static int	iv2is[16] = {
 				0, 0, 0, ES4H_IS_INT3,
@@ -1001,7 +995,7 @@ dgrs_download(struct net_device *dev0)
 	/*
 	 * Map in the dual port memory
 	 */
-	priv0->vmem = IOREMAP(dev0->mem_start, 2048*1024);
+	priv0->vmem = ioremap(dev0->mem_start, 2048*1024);
 	if (!priv0->vmem)
 	{
 		printk("%s: cannot map in board memory\n", dev0->name);
@@ -1048,7 +1042,7 @@ dgrs_download(struct net_device *dev0)
 	memcpy(priv0->vmem, dgrs_code, dgrs_ncode);	/* Load code */
 	if (memcmp(priv0->vmem, dgrs_code, dgrs_ncode))
 	{
-		IOUNMAP(priv0->vmem);
+		iounmap(priv0->vmem);
 		priv0->vmem = NULL;
 		printk("%s: download compare failed\n", dev0->name);
 		return -ENXIO;
@@ -1149,7 +1143,7 @@ int __init
 dgrs_probe1(struct net_device *dev)
 {
 	DGRS_PRIV	*priv = (DGRS_PRIV *) dev->priv;
-	int		i;
+	unsigned long	i;
 	int		rc;
 
 	printk("%s: Digi RightSwitch io=%lx mem=%lx irq=%d plx=%lx dma=%lx\n",
@@ -1161,9 +1155,7 @@ dgrs_probe1(struct net_device *dev)
 	 */
 	rc = dgrs_download(dev);
 	if (rc)
-	{
-		return rc;
-	}
+		goto err_out;
 
 	/*
 	 * Get ether address of board
@@ -1177,7 +1169,8 @@ dgrs_probe1(struct net_device *dev)
 	if (dev->dev_addr[0] & 1)
 	{
 		printk("%s: Illegal Ethernet Address\n", dev->name);
-		return (-ENXIO);
+		rc = -ENXIO;
+		goto err_out;
 	}
 
 	/*
@@ -1186,9 +1179,10 @@ dgrs_probe1(struct net_device *dev)
 	 */
 	if (priv->plxreg)
 		OUTL(dev->base_addr + PLX_LCL2PCI_DOORBELL, 1);
+	
 	rc = request_irq(dev->irq, &dgrs_intr, SA_SHIRQ, "RightSwitch", dev);
 	if (rc)
-		return (rc);
+		goto err_out;
 
 	priv->intrcnt = 0;
 	for (i = jiffies + 2*HZ + HZ/2; time_after(i, jiffies); )
@@ -1199,16 +1193,22 @@ dgrs_probe1(struct net_device *dev)
 	}
 	if (priv->intrcnt < 2)
 	{
-		printk("%s: Not interrupting on IRQ %d (%d)\n",
+		printk(KERN_ERR "%s: Not interrupting on IRQ %d (%d)\n",
 				dev->name, dev->irq, priv->intrcnt);
-		return (-ENXIO);
+		rc = -ENXIO;
+		goto err_free_irq;
 	}
 
 	/*
 	 *	Register the /proc/ioports information...
 	 */
-	request_region(dev->base_addr, 256, "RightSwitch");
-
+	if (!request_region(dev->base_addr, 256, "RightSwitch")) {
+		printk(KERN_ERR "%s: io 0x%3lX, which is busy.\n", dev->name,
+				dev->base_addr);
+		rc = -EBUSY;
+		goto err_free_irq;
+	}
+	
 	/*
 	 *	Entry points...
 	 */
@@ -1219,7 +1219,12 @@ dgrs_probe1(struct net_device *dev)
 	dev->set_multicast_list = &dgrs_set_multicast_list;
 	dev->do_ioctl = &dgrs_ioctl;
 
-	return (0);
+	return rc;
+
+err_free_irq:
+	free_irq(dev->irq, dev);
+err_out:
+       	return rc;
 }
 
 int __init 
@@ -1247,15 +1252,13 @@ dgrs_found_device(
 )
 {
 	DGRS_PRIV	*priv;
-	struct net_device *dev;
+	struct net_device *dev, *aux;
+	int i, ret;
 
-	/* Allocate and fill new device structure. */
-	int dev_size = sizeof(struct net_device) + sizeof(DGRS_PRIV);
-	int i;
+	dev = alloc_etherdev(sizeof(DGRS_PRIV));
+	if (!dev)
+		return -ENOMEM;
 
-	dev = (struct net_device *) kmalloc(dev_size, GFP_KERNEL);
-	memset(dev, 0, dev_size);
-	dev->priv = ((void *)dev) + sizeof(struct net_device);
 	priv = (DGRS_PRIV *)dev->priv;
 
 	dev->base_addr = io;
@@ -1271,11 +1274,14 @@ dgrs_found_device(
 
 	dev->init = dgrs_probe1;
 	SET_MODULE_OWNER(dev);
-	ether_setup(dev);
+
+	if (register_netdev(dev) != 0) {
+		free_netdev(dev);
+		return -EIO;
+	}
+
 	priv->next_dev = dgrs_root_dev;
 	dgrs_root_dev = dev;
-	if (register_netdev(dev) != 0)
-		return -EIO;
 
 	if ( !dgrs_nicmode )
 		return (0);	/* Switch mode, we are done */
@@ -1291,11 +1297,18 @@ dgrs_found_device(
 		struct net_device	*devN;
 		DGRS_PRIV	*privN;
 			/* Allocate new dev and priv structures */
-		devN = (struct net_device *) kmalloc(dev_size, GFP_KERNEL);
-			/* Make it an exact copy of dev[0]... */
-		memcpy(devN, dev, dev_size);
-		devN->priv = ((void *)devN) + sizeof(struct net_device);
+		devN = alloc_etherdev(sizeof(DGRS_PRIV));
+		ret = -ENOMEM;
+		if (!devN) 
+			goto fail;
+
+		/* Make it an exact copy of dev[0]... */
+		*devN = *dev;
+
+		/* copy the priv structure of dev[0] */
 		privN = (DGRS_PRIV *)devN->priv;
+		*privN = *priv;
+
 			/* ... and zero out VM areas */
 		privN->vmem = 0;
 		privN->vplxdma = 0;
@@ -1303,17 +1316,31 @@ dgrs_found_device(
 		devN->irq = 0;
 			/* ... and base MAC address off address of 1st port */
 		devN->dev_addr[5] += i;
+			/* ... choose a new name */
+		strncpy(devN->name, "eth%d", IFNAMSIZ);
+		devN->init = dgrs_initclone;
+		SET_MODULE_OWNER(devN);
+
+		ret = -EIO;
+		if (register_netdev(devN)) {
+			free_netdev(devN);
+			goto fail;
+		}
 		privN->chan = i+1;
 		priv->devtbl[i] = devN;
-		devN->init = dgrs_initclone;
-		SET_MODULE_OWNER(dev);
-		ether_setup(devN);
 		privN->next_dev = dgrs_root_dev;
 		dgrs_root_dev = devN;
-		if (register_netdev(devN) != 0)
-			return -EIO;
 	}
-	return (0);
+	return 0;
+fail:	aux = priv->next_dev;
+	while (dgrs_root_dev != aux) {
+		struct net_device *d = dgrs_root_dev;
+		
+		dgrs_root_dev = ((DGRS_PRIV *)d->priv)->next_dev;
+		unregister_netdev(d);
+		free_netdev(d);
+	}
+	return ret;
 }
 
 /*
@@ -1329,55 +1356,51 @@ static int __init  dgrs_scan(void)
 	uint	irq;
 	uint	plxreg;
 	uint	plxdma;
+	struct pci_dev *pdev = NULL;
 
 	/*
 	 *	First, check for PCI boards
 	 */
-	if (pci_present())
+	while ((pdev = pci_find_device(SE6_PCI_VENDOR_ID, SE6_PCI_DEVICE_ID, pdev)) != NULL)
 	{
-		struct pci_dev *pdev = NULL;
+		/*
+		 * Get and check the bus-master and latency values.
+		 * Some PCI BIOSes fail to set the master-enable bit,
+		 * and the latency timer must be set to the maximum
+		 * value to avoid data corruption that occurs when the
+		 * timer expires during a transfer.  Yes, it's a bug.
+		 */
+		if (pci_enable_device(pdev))
+			continue;
+		pci_set_master(pdev);
 
-		while ((pdev = pci_find_device(SE6_PCI_VENDOR_ID, SE6_PCI_DEVICE_ID, pdev)) != NULL)
-		{
-			plxreg = pci_resource_start (pdev, 0);
-			io = pci_resource_start (pdev, 1);
-			mem = pci_resource_start (pdev, 2);
-			pci_read_config_dword(pdev, 0x30, &plxdma);
-			irq = pdev->irq;
-			plxdma &= ~15;
+		plxreg = pci_resource_start (pdev, 0);
+		io = pci_resource_start (pdev, 1);
+		mem = pci_resource_start (pdev, 2);
+		pci_read_config_dword(pdev, 0x30, &plxdma);
+		irq = pdev->irq;
+		plxdma &= ~15;
 
-			/*
-			 * On some BIOSES, the PLX "expansion rom" (used for DMA)
-			 * address comes up as "0".  This is probably because
-			 * the BIOS doesn't see a valid 55 AA ROM signature at
-			 * the "ROM" start and zeroes the address.  To get
-			 * around this problem the SE-6 is configured to ask
-			 * for 4 MB of space for the dual port memory.  We then
-			 * must set its range back to 2 MB, and use the upper
-			 * half for DMA register access
-			 */
-			OUTL(io + PLX_SPACE0_RANGE, 0xFFE00000L);
-			if (plxdma == 0)
-				plxdma = mem + (2048L * 1024L);
-			pci_write_config_dword(pdev, 0x30, plxdma + 1);
-			pci_read_config_dword(pdev, 0x30, &plxdma);
-			plxdma &= ~15;
+		/*
+		 * On some BIOSES, the PLX "expansion rom" (used for DMA)
+		 * address comes up as "0".  This is probably because
+		 * the BIOS doesn't see a valid 55 AA ROM signature at
+		 * the "ROM" start and zeroes the address.  To get
+		 * around this problem the SE-6 is configured to ask
+		 * for 4 MB of space for the dual port memory.  We then
+		 * must set its range back to 2 MB, and use the upper
+		 * half for DMA register access
+		 */
+		OUTL(io + PLX_SPACE0_RANGE, 0xFFE00000L);
+		if (plxdma == 0)
+			plxdma = mem + (2048L * 1024L);
+		pci_write_config_dword(pdev, 0x30, plxdma + 1);
+		pci_read_config_dword(pdev, 0x30, &plxdma);
+		plxdma &= ~15;
 
-			/*
-			 * Get and check the bus-master and latency values.
-			 * Some PCI BIOSes fail to set the master-enable bit,
-			 * and the latency timer must be set to the maximum
-			 * value to avoid data corruption that occurs when the
-			 * timer expires during a transfer.  Yes, it's a bug.
-			 */
-			if (pci_enable_device(pdev))
-				continue;
-			pci_set_master(pdev);
+		dgrs_found_device(io, mem, irq, plxreg, plxdma);
 
-			dgrs_found_device(io, mem, irq, plxreg, plxdma);
-
-			cards_found++;
-		}
+		cards_found++;
 	}
 
 	/*
@@ -1430,6 +1453,9 @@ MODULE_PARM(ipaddr, "1-4i");
 MODULE_PARM(iptrap, "1-4i");
 MODULE_PARM(ipxnet, "i");
 MODULE_PARM(nicmode, "i");
+MODULE_PARM_DESC(debug, "Digi RightSwitch enable debugging (0-1)");
+MODULE_PARM_DESC(dma, "Digi RightSwitch enable BM DMA (0-1)");
+MODULE_PARM_DESC(nicmode, "Digi RightSwitch operating mode (1: switch, 2: multi-NIC)");
 
 static int __init dgrs_init_module (void)
 {
@@ -1468,8 +1494,8 @@ static int __init dgrs_init_module (void)
 
 	if (dgrs_debug)
 	{
-		printk("dgrs: SW=%s FW=Build %d %s\n",
-			version, dgrs_firmnum, dgrs_firmdate);
+		printk(KERN_INFO "dgrs: SW=%s FW=Build %d %s\nFW Version=%s\n",
+		       version, dgrs_firmnum, dgrs_firmdate, dgrs_firmver);
 	}
 
 	/*
@@ -1495,16 +1521,16 @@ static void __exit dgrs_cleanup_module (void)
 		proc_reset(priv->devtbl[0], 1);
 
 		if (priv->vmem)
-			IOUNMAP(priv->vmem);
+			iounmap(priv->vmem);
 		if (priv->vplxdma)
-			IOUNMAP((uchar *) priv->vplxdma);
+			iounmap((uchar *) priv->vplxdma);
 
 		release_region(dgrs_root_dev->base_addr, 256);
 
 		if (dgrs_root_dev->irq)
 			free_irq(dgrs_root_dev->irq, dgrs_root_dev);
 
-                kfree(dgrs_root_dev);
+                free_netdev(dgrs_root_dev);
                 dgrs_root_dev = next_dev;
         }
 }

@@ -16,7 +16,7 @@
  * are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
  *
  * Alternatively, the contents of this file may be used under the
- * terms of the GNU Public License version 2 (the "GPL"), in which
+ * terms of the GNU General Public License version 2 (the "GPL"), in which
  * case the provisions of the GPL are applicable instead of the
  * above.  If you wish to allow the use of your version of this file
  * only under the terms of the GPL and not to allow others to use
@@ -98,7 +98,6 @@ typedef struct event_callback_args_t {
     void	*buffer;
     void	*misc;
     void	*client_data;
-    struct bus_operations *bus;
 } event_callback_args_t;
 
 /* for GetConfigurationInfo */
@@ -181,6 +180,7 @@ typedef struct config_req_t {
 #define INT_MEMORY		0x01
 #define INT_MEMORY_AND_IO	0x02
 #define INT_CARDBUS		0x04
+#define INT_ZOOMED_VIDEO	0x08
 
 /* For RequestIO and ReleaseIO */
 typedef struct io_req_t {
@@ -317,7 +317,7 @@ typedef struct error_info_t {
 
 /* Special stuff for binding drivers to sockets */
 typedef struct bind_req_t {
-    socket_t	Socket;
+    struct pcmcia_socket	*Socket;
     u_char	Function;
     dev_info_t	*dev_info;
 } bind_req_t;
@@ -326,7 +326,7 @@ typedef struct bind_req_t {
 #define BIND_FN_ALL	0xff
 
 typedef struct mtd_bind_t {
-    socket_t	Socket;
+    struct pcmcia_socket	*Socket;
     u_int	Attributes;
     u_int	CardOffset;
     dev_info_t	*dev_info;

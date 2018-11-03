@@ -1,5 +1,5 @@
 /*
- *  linux/arch/ppc/kernel/ptrace.c
+ *  arch/ppc/kernel/ptrace.c
  *
  *  PowerPC version
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
@@ -25,6 +25,7 @@
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
+#include <linux/security.h>
 
 #include <asm/uaccess.h>
 #include <asm/page.h>
@@ -34,7 +35,11 @@
 /*
  * Set of msr bits that gdb can change on behalf of a process.
  */
-#define MSR_DEBUGCHANGE	(MSR_FE0 | MSR_SE | MSR_BE | MSR_FE1)
+#ifdef CONFIG_4xx
+#define MSR_DEBUGCHANGE	0
+#else
+#define MSR_DEBUGCHANGE	(MSR_SE | MSR_BE)
+#endif
 
 /*
  * does not yet catch signals sent when the child dies.
@@ -46,7 +51,8 @@
  */
 static inline unsigned long get_reg(struct task_struct *task, int regno)
 {
-	if (regno < sizeof(struct pt_regs) / sizeof(unsigned long))
+	if (regno < sizeof(struct pt_regs) / sizeof(unsigned long)
+	    && task->thread.regs != NULL)
 		return ((unsigned long *)task->thread.regs)[regno];
 	return (0);
 }
@@ -57,7 +63,7 @@ static inline unsigned long get_reg(struct task_struct *task, int regno)
 static inline int put_reg(struct task_struct *task, int regno,
 			  unsigned long data)
 {
-	if (regno <= PT_MQ) {
+	if (regno <= PT_MQ && task->thread.regs != NULL) {
 		if (regno == PT_MSR)
 			data = (data & MSR_DEBUGCHANGE)
 				| (task->thread.regs->msr & ~MSR_DEBUGCHANGE);
@@ -67,18 +73,102 @@ static inline int put_reg(struct task_struct *task, int regno,
 	return -EIO;
 }
 
+#ifdef CONFIG_ALTIVEC
+/*
+ * Get contents of AltiVec register state in task TASK
+ */
+static inline int get_vrregs(unsigned long *data, struct task_struct *task)
+{
+	int i, j;
+
+	if (!access_ok(VERIFY_WRITE, data, 133 * sizeof(unsigned long)))
+		return -EFAULT;
+
+	/* copy AltiVec registers VR[0] .. VR[31] */
+	for (i = 0; i < 32; i++)
+		for (j = 0; j < 4; j++, data++)
+			if (__put_user(task->thread.vr[i].u[j], data))
+				return -EFAULT;
+
+	/* copy VSCR */
+	for (i = 0; i < 4; i++, data++)
+		if (__put_user(task->thread.vscr.u[i], data))
+			return -EFAULT;
+
+        /* copy VRSAVE */
+	if (__put_user(task->thread.vrsave, data))
+		return -EFAULT;
+
+	return 0;
+}
+
+/*
+ * Write contents of AltiVec register state into task TASK.
+ */
+static inline int set_vrregs(struct task_struct *task, unsigned long *data)
+{
+	int i, j;
+
+	if (!access_ok(VERIFY_READ, data, 133 * sizeof(unsigned long)))
+		return -EFAULT;
+
+	/* copy AltiVec registers VR[0] .. VR[31] */
+	for (i = 0; i < 32; i++)
+		for (j = 0; j < 4; j++, data++)
+			if (__get_user(task->thread.vr[i].u[j], data))
+				return -EFAULT;
+
+	/* copy VSCR */
+	for (i = 0; i < 4; i++, data++)
+		if (__get_user(task->thread.vscr.u[i], data))
+			return -EFAULT;
+
+	/* copy VRSAVE */
+	if (__get_user(task->thread.vrsave, data))
+		return -EFAULT;
+
+	return 0;
+}
+#endif
+
 static inline void
 set_single_step(struct task_struct *task)
 {
 	struct pt_regs *regs = task->thread.regs;
-	regs->msr |= MSR_SE;
+
+	if (regs != NULL) {
+#ifdef CONFIG_4xx
+		task->thread.dbcr0 = DBCR0_IDM | DBCR0_IC;
+		/* MSR.DE should already be set */
+#else
+		regs->msr |= MSR_SE;
+#endif
+	}
 }
 
 static inline void
 clear_single_step(struct task_struct *task)
 {
 	struct pt_regs *regs = task->thread.regs;
-	regs->msr &= ~MSR_SE;
+
+	if (regs != NULL) {
+#ifdef CONFIG_4xx
+		task->thread.dbcr0 = 0;
+#else
+		regs->msr &= ~MSR_SE;
+#endif
+	}
+}
+
+/*
+ * Called by kernel/ptrace.c when detaching..
+ *
+ * Make sure single step bits etc are not set.
+ */
+void ptrace_disable(struct task_struct *child)
+{
+	/* make sure the single step bit is not set. */
+	clear_single_step(child);
 }
 
 int sys_ptrace(long request, long pid, long addr, long data)
@@ -90,6 +180,9 @@ int sys_ptrace(long request, long pid, long addr, long data)
 	if (request == PTRACE_TRACEME) {
 		/* are we already being traced? */
 		if (current->ptrace & PT_PTRACED)
+			goto out;
+		ret = security_ptrace(current->parent, current);
+		if (ret)
 			goto out;
 		/* set the ptrace bit in the process flags. */
 		current->ptrace |= PT_PTRACED;
@@ -110,48 +203,17 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		goto out_tsk;
 
 	if (request == PTRACE_ATTACH) {
-		if (child == current)
-			goto out_tsk;
-		if ((!child->dumpable ||
-		    (current->uid != child->euid) ||
-		    (current->uid != child->suid) ||
-		    (current->uid != child->uid) ||
-	 	    (current->gid != child->egid) ||
-		    (current->gid != child->sgid) ||
-		    (!cap_issubset(child->cap_permitted, current->cap_permitted)) ||
-		    (current->gid != child->gid))
-		    && !capable(CAP_SYS_PTRACE))
-			goto out_tsk;
-		/* the same process cannot be attached many times */
-		if (child->ptrace & PT_PTRACED)
-			goto out_tsk;
-		child->ptrace |= PT_PTRACED;
-
-		write_lock_irq(&tasklist_lock);
-		if (child->p_pptr != current) {
-			REMOVE_LINKS(child);
-			child->p_pptr = current;
-			SET_LINKS(child);
-		}
-		write_unlock_irq(&tasklist_lock);
-
-		send_sig(SIGSTOP, child, 1);
-		ret = 0;
+		ret = ptrace_attach(child);
 		goto out_tsk;
 	}
-	ret = -ESRCH;
-	if (!(child->ptrace & PT_PTRACED))
-		goto out_tsk;
-	if (child->state != TASK_STOPPED) {
-		if (request != PTRACE_KILL)
-			goto out_tsk;
-	}
-	if (child->p_pptr != current)
+
+	ret = ptrace_check_attach(child, request == PTRACE_KILL);
+	if (ret < 0)
 		goto out_tsk;
 
 	switch (request) {
 	/* when I and D space are separate, these will need to be fixed. */
-	case PTRACE_PEEKTEXT: /* read word at location addr. */ 
+	case PTRACE_PEEKTEXT: /* read word at location addr. */
 	case PTRACE_PEEKDATA: {
 		unsigned long tmp;
 		int copied;
@@ -172,9 +234,11 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		ret = -EIO;
 		/* convert to index and check */
 		index = (unsigned long) addr >> 2;
-		if ((addr & 3) || index > PT_FPSCR)
+		if ((addr & 3) || index > PT_FPSCR
+		    || child->thread.regs == NULL)
 			break;
 
+		CHECK_FULL_REGS(child->thread.regs);
 		if (index < PT_FPR0) {
 			tmp = get_reg(child, (int) index);
 		} else {
@@ -196,16 +260,17 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		break;
 
 	/* write the word at location addr in the USER area */
-	/* XXX this will need fixing for 64-bit */
 	case PTRACE_POKEUSR: {
 		unsigned long index;
 
 		ret = -EIO;
 		/* convert to index and check */
 		index = (unsigned long) addr >> 2;
-		if ((addr & 3) || index > PT_FPSCR)
+		if ((addr & 3) || index > PT_FPSCR
+		    || child->thread.regs == NULL)
 			break;
 
+		CHECK_FULL_REGS(child->thread.regs);
 		if (index == PT_ORIG_R3)
 			break;
 		if (index < PT_FPR0) {
@@ -224,10 +289,11 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		ret = -EIO;
 		if ((unsigned long) data > _NSIG)
 			break;
-		if (request == PTRACE_SYSCALL)
-			child->ptrace |= PT_TRACESYS;
-		else
-			child->ptrace &= ~PT_TRACESYS;
+		if (request == PTRACE_SYSCALL) {
+			set_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
+		} else {
+			clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
+		}
 		child->exit_code = data;
 		/* make sure the single step bit is not set. */
 		clear_single_step(child);
@@ -237,8 +303,8 @@ int sys_ptrace(long request, long pid, long addr, long data)
 	}
 
 /*
- * make the child exit.  Best I can do is send it a sigkill. 
- * perhaps it should be put in the status that it wants to 
+ * make the child exit.  Best I can do is send it a sigkill.
+ * perhaps it should be put in the status that it wants to
  * exit.
  */
 	case PTRACE_KILL: {
@@ -256,7 +322,7 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		ret = -EIO;
 		if ((unsigned long) data > _NSIG)
 			break;
-		child->ptrace &= ~PT_TRACESYS;
+		clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
 		set_single_step(child);
 		child->exit_code = data;
 		/* give it a chance to run. */
@@ -265,44 +331,47 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		break;
 	}
 
-	case PTRACE_DETACH: { /* detach a process that was attached. */
-		ret = -EIO;
-		if ((unsigned long) data > _NSIG)
-			break;
-		child->ptrace &= ~(PT_PTRACED|PT_TRACESYS);
-		child->exit_code = data;
-		write_lock_irq(&tasklist_lock);
-		REMOVE_LINKS(child);
-		child->p_pptr = child->p_opptr;
-		SET_LINKS(child);
-		write_unlock_irq(&tasklist_lock);
-		/* make sure the single step bit is not set. */
-		clear_single_step(child);
-		wake_up_process(child);
-		ret = 0;
+	case PTRACE_DETACH:
+		ret = ptrace_detach(child, data);
 		break;
-	}
+
+#ifdef CONFIG_ALTIVEC
+	case PTRACE_GETVRREGS:
+		/* Get the child altivec register state. */
+		if (child->thread.regs->msr & MSR_VEC)
+			giveup_altivec(child);
+		ret = get_vrregs((unsigned long *)data, child);
+		break;
+
+	case PTRACE_SETVRREGS:
+		/* Set the child altivec register state. */
+		/* this is to clear the MSR_VEC bit to force a reload
+		 * of register state from memory */
+		if (child->thread.regs->msr & MSR_VEC)
+			giveup_altivec(child);
+		ret = set_vrregs(child, (unsigned long *)data);
+		break;
+#endif
 
 	default:
-		ret = -EIO;
+		ret = ptrace_request(child, request, addr, data);
 		break;
 	}
 out_tsk:
-	free_task_struct(child);
+	put_task_struct(child);
 out:
 	unlock_kernel();
 	return ret;
 }
 
-void syscall_trace(void)
+void do_syscall_trace(void)
 {
-	if ((current->ptrace & (PT_PTRACED|PT_TRACESYS))
-			!= (PT_PTRACED|PT_TRACESYS))
+        if (!test_thread_flag(TIF_SYSCALL_TRACE)
+	    || !(current->ptrace & PT_PTRACED))
 		return;
-	current->exit_code = SIGTRAP;
-	current->state = TASK_STOPPED;
-	notify_parent(current, SIGCHLD);
-	schedule();
+	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
+				 ? 0x80 : 0));
+
 	/*
 	 * this isn't the same as continuing with a signal, but it will do
 	 * for normal use.  strace only continues with a signal if the

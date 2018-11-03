@@ -2,7 +2,7 @@
  * linux/fs/hfs/extent.c
  *
  * Copyright (C) 1995-1997  Paul H. Hargrove
- * This file may be distributed under the terms of the GNU Public License.
+ * This file may be distributed under the terms of the GNU General Public License.
  *
  * This file contains the functions related to the extents B-tree.
  *
@@ -48,10 +48,7 @@ static inline void build_key(struct hfs_ext_key *key,
  * Get an exclusive lock on the B-tree bitmap.
  */
 static inline void lock_bitmap(struct hfs_mdb *mdb) {
-	while (mdb->bitmap_lock) {
-		hfs_sleep_on(&mdb->bitmap_wait);
-	}
-	mdb->bitmap_lock = 1;
+	down(&mdb->bitmap_sem);
 }
 
 /*
@@ -60,8 +57,7 @@ static inline void lock_bitmap(struct hfs_mdb *mdb) {
  * Relinquish an exclusive lock on the B-tree bitmap.
  */
 static inline void unlock_bitmap(struct hfs_mdb *mdb) {
-	mdb->bitmap_lock = 0;
-	hfs_wake_up(&mdb->bitmap_wait);
+	up(&mdb->bitmap_sem);
 }
 
 /*

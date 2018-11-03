@@ -42,11 +42,7 @@ extern struct neigh_table nd_tbl;
 struct nd_msg {
         struct icmp6hdr	icmph;
         struct in6_addr	target;
-        struct {
-                __u8	opt_type;
-                __u8	opt_len;
-                __u8	link_addr[MAX_ADDR_LEN];
-        } opt;
+	__u8		opt[0];
 };
 
 struct ra_msg {
@@ -55,12 +51,17 @@ struct ra_msg {
 	__u32			retrans_timer;
 };
 
+struct nd_opt_hdr {
+	__u8		nd_opt_type;
+	__u8		nd_opt_len;
+} __attribute__((__packed__));
+
 
 extern int			ndisc_init(struct net_proto_family *ops);
 
 extern void			ndisc_cleanup(void);
 
-extern int			ndisc_rcv(struct sk_buff *skb, unsigned long len);
+extern int			ndisc_rcv(struct sk_buff *skb);
 
 extern void			ndisc_send_ns(struct net_device *dev,
 					      struct neighbour *neigh,
@@ -91,13 +92,9 @@ extern int			igmp6_init(struct net_proto_family *ops);
 
 extern void			igmp6_cleanup(void);
 
-extern int			igmp6_event_query(struct sk_buff *skb,
-						  struct icmp6hdr *hdr,
-						  int len);
+extern int			igmp6_event_query(struct sk_buff *skb);
 
-extern int			igmp6_event_report(struct sk_buff *skb,
-						   struct icmp6hdr *hdr,
-						   int len);
+extern int			igmp6_event_report(struct sk_buff *skb);
 
 extern void			igmp6_cleanup(void);
 

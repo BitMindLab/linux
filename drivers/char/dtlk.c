@@ -47,21 +47,15 @@
 
  */
 
-#ifdef MODVERSIONS
-#include <linux/modversions.h>
-#endif
-
 #include <linux/module.h>
-#include <linux/version.h>
 
 #define KERNEL
 #include <linux/types.h>
 #include <linux/fs.h>
 #include <linux/mm.h>		/* for verify_area */
 #include <linux/errno.h>	/* for -EBUSY */
-#include <linux/ioport.h>	/* for check_region, request_region */
+#include <linux/ioport.h>	/* for request_region */
 #include <linux/delay.h>	/* for loops_per_jiffy */
-#include <asm/segment.h>	/* for put_user_byte */
 #include <asm/io.h>		/* for inb_p, outb_p, inb, outb, etc. */
 #include <asm/uaccess.h>	/* for get_user, etc. */
 #include <linux/wait.h>		/* for wait_queue */
@@ -103,13 +97,13 @@ static int dtlk_ioctl(struct inode *inode, struct file *file,
 
 static struct file_operations dtlk_fops =
 {
-	owner:		THIS_MODULE,
-	read:		dtlk_read,
-	write:		dtlk_write,
-	poll:		dtlk_poll,
-	ioctl:		dtlk_ioctl,
-	open:		dtlk_open,
-	release:	dtlk_release,
+	.owner		= THIS_MODULE,
+	.read		= dtlk_read,
+	.write		= dtlk_write,
+	.poll		= dtlk_poll,
+	.ioctl		= dtlk_ioctl,
+	.open		= dtlk_open,
+	.release	= dtlk_release,
 };
 
 /* local prototypes */
@@ -130,9 +124,9 @@ static void dtlk_timer_tick(unsigned long data);
 static ssize_t dtlk_read(struct file *file, char *buf,
 			 size_t count, loff_t * ppos)
 {
-	unsigned int minor = MINOR(file->f_dentry->d_inode->i_rdev);
+	unsigned int minor = iminor(file->f_dentry->d_inode);
 	char ch;
-	int retval, i = 0, retries;
+	int i = 0, retries;
 
 	/* Can't seek (pread) on the DoubleTalk.  */
 	if (ppos != &file->f_pos)
@@ -148,8 +142,8 @@ static ssize_t dtlk_read(struct file *file, char *buf,
 		while (i < count && dtlk_readable()) {
 			ch = dtlk_read_lpc();
 			/*        printk("dtlk_read() reads 0x%02x\n", ch); */
-			if ((retval = put_user(ch, buf++)))
-				return retval;
+			if (put_user(ch, buf++))
+				return -EFAULT;
 			i++;
 		}
 		if (i)
@@ -167,7 +161,7 @@ static ssize_t dtlk_read(struct file *file, char *buf,
 static ssize_t dtlk_write(struct file *file, const char *buf,
 			  size_t count, loff_t * ppos)
 {
-	int i = 0, retries = 0, err, ch;
+	int i = 0, retries = 0, ch;
 
 	TRACE_TEXT("(dtlk_write");
 #ifdef TRACING
@@ -175,7 +169,8 @@ static ssize_t dtlk_write(struct file *file, const char *buf,
 	{
 		int i, ch;
 		for (i = 0; i < count; i++) {
-			err = get_user(ch, buf + i);
+			if (get_user(ch, buf + i))
+				return -EFAULT;
 			if (' ' <= ch && ch <= '~')
 				printk("%c", ch);
 			else
@@ -189,11 +184,11 @@ static ssize_t dtlk_write(struct file *file, const char *buf,
 	if (ppos != &file->f_pos)
 		return -ESPIPE;
 
-	if (MINOR(file->f_dentry->d_inode->i_rdev) != DTLK_MINOR)
+	if (iminor(file->f_dentry->d_inode) != DTLK_MINOR)
 		return -EINVAL;
 
 	while (1) {
-		while (i < count && (err = get_user(ch, buf)) == 0 &&
+		while (i < count && !get_user(ch, buf) &&
 		       (ch == DTLK_CLEAR || dtlk_writeable())) {
 			dtlk_write_tts(ch);
 			buf++;
@@ -283,7 +278,6 @@ static int dtlk_ioctl(struct inode *inode,
 		      unsigned long arg)
 {
 	struct dtlk_settings *sp;
-	int err;
 	char portval;
 	TRACE_TEXT(" dtlk_ioctl");
 
@@ -291,9 +285,8 @@ static int dtlk_ioctl(struct inode *inode,
 
 	case DTLK_INTERROGATE:
 		sp = dtlk_interrogate();
-		err = copy_to_user((char *) arg, (char *) sp,
-				   sizeof(struct dtlk_settings));
-		if (err)
+		if (copy_to_user((char *) arg, (char *) sp,
+				   sizeof(struct dtlk_settings)))
 			return -EINVAL;
 		return 0;
 
@@ -310,7 +303,7 @@ static int dtlk_open(struct inode *inode, struct file *file)
 {
 	TRACE_TEXT("(dtlk_open");
 
-	switch (MINOR(inode->i_rdev)) {
+	switch (iminor(inode)) {
 	case DTLK_MINOR:
 		if (dtlk_busy)
 			return -EBUSY;
@@ -325,7 +318,7 @@ static int dtlk_release(struct inode *inode, struct file *file)
 {
 	TRACE_TEXT("(dtlk_release");
 
-	switch (MINOR(inode->i_rdev)) {
+	switch (iminor(inode)) {
 	case DTLK_MINOR:
 		break;
 
@@ -333,32 +326,27 @@ static int dtlk_release(struct inode *inode, struct file *file)
 		break;
 	}
 	TRACE_RET;
-
-	lock_kernel();
+	
 	del_timer(&dtlk_timer);
-	unlock_kernel();
 
 	return 0;
 }
-
-static devfs_handle_t devfs_handle;
 
 static int __init dtlk_init(void)
 {
 	dtlk_port_lpc = 0;
 	dtlk_port_tts = 0;
 	dtlk_busy = 0;
-	dtlk_major = devfs_register_chrdev(0, "dtlk", &dtlk_fops);
+	dtlk_major = register_chrdev(0, "dtlk", &dtlk_fops);
 	if (dtlk_major == 0) {
 		printk(KERN_ERR "DoubleTalk PC - cannot register device\n");
 		return 0;
 	}
 	if (dtlk_dev_probe() == 0)
 		printk(", MAJOR %d\n", dtlk_major);
-	devfs_handle = devfs_register (NULL, "dtlk", DEVFS_FL_DEFAULT,
-				       dtlk_major, DTLK_MINOR,
-				       S_IFCHR | S_IRUSR | S_IWUSR,
-				       &dtlk_fops, NULL);
+
+	devfs_mk_cdev(MKDEV(dtlk_major, DTLK_MINOR),
+		       S_IFCHR | S_IRUSR | S_IWUSR, "dtlk");
 
 	init_timer(&dtlk_timer);
 	dtlk_timer.function = dtlk_timer_tick;
@@ -377,8 +365,8 @@ static void __exit dtlk_cleanup (void)
 						   signals... */
 
 	dtlk_write_tts(DTLK_CLEAR);
-	devfs_unregister_chrdev(dtlk_major, "dtlk");
-	devfs_unregister(devfs_handle);
+	unregister_chrdev(dtlk_major, "dtlk");
+	devfs_remove("dtlk");
 	release_region(dtlk_port_lpc, DTLK_IO_EXTENT);
 }
 
@@ -426,12 +414,11 @@ static int __init dtlk_dev_probe(void)
 		       dtlk_portlist[i], (testval = inw_p(dtlk_portlist[i])));
 #endif
 
-		if (check_region(dtlk_portlist[i], DTLK_IO_EXTENT))
+		if (!request_region(dtlk_portlist[i], DTLK_IO_EXTENT, 
+			       "dtlk"))
 			continue;
 		testval = inw_p(dtlk_portlist[i]);
 		if ((testval &= 0xfbff) == 0x107f) {
-			request_region(dtlk_portlist[i], DTLK_IO_EXTENT, 
-				       "dtlk");
 			dtlk_port_lpc = dtlk_portlist[i];
 			dtlk_port_tts = dtlk_port_lpc + 1;
 
@@ -516,6 +503,7 @@ for (i = 0; i < 10; i++)			\
 
 			return 0;
 		}
+		release_region(dtlk_portlist[i], DTLK_IO_EXTENT);
 	}
 
 	printk(KERN_INFO "\nDoubleTalk PC - not found\n");
@@ -683,3 +671,5 @@ static char dtlk_write_tts(char ch)
 #endif
 	return 0;
 }
+
+MODULE_LICENSE("GPL");

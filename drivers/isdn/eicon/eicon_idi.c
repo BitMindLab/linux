@@ -1,7 +1,7 @@
-/* $Id: eicon_idi.c,v 1.41 2000/08/12 18:00:47 armin Exp $
+/* $Id: eicon_idi.c,v 1.1.4.1.2.4 2002/10/01 11:29:13 armin Exp $
  *
  * ISDN lowlevel-module for Eicon active cards.
- *        IDI interface 
+ * IDI interface 
  *
  * Copyright 1998-2000  by Armin Schindler (mac@melware.de)
  * Copyright 1999,2000  Cytronics & Melware (info@melware.de)
@@ -11,24 +11,12 @@
  *		capabilities with Diva Server cards.
  *		(dor@deutschemailbox.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
 #include <linux/config.h>
-#define __NO_VERSION__
 #include "eicon.h"
 #include "eicon_idi.h"
 #include "eicon_dsp.h"
@@ -36,7 +24,7 @@
 
 #undef EICON_FULL_SERVICE_OKTETT
 
-char *eicon_idi_revision = "$Revision: 1.41 $";
+char *eicon_idi_revision = "$Revision: 1.1.4.1.2.4 $";
 
 eicon_manifbuf *manbuf;
 
@@ -1130,8 +1118,7 @@ idi_fill_in_T30(eicon_chan *chan, unsigned char *buffer)
 		//eicon_log(NULL, 128, "sT30:universal_7 = %x\n", t30->universal_7);
 		eicon_log(NULL, 128, "sT30:station_id_len = %x\n", t30->station_id_len);
 		eicon_log(NULL, 128, "sT30:head_line_len = %x\n", t30->head_line_len);
-		strncpy(st, t30->station_id, t30->station_id_len);
-		st[t30->station_id_len] = 0;
+		strlcpy(st, t30->station_id, t30->station_id_len + 1);
 		eicon_log(NULL, 128, "sT30:station_id = <%s>\n", st);
 	}
 	return(sizeof(eicon_t30_s));
@@ -1207,8 +1194,7 @@ idi_parse_edata(eicon_card *ccard, eicon_chan *chan, unsigned char *buffer, int 
 		//eicon_log(ccard, 128, "rT30:universal_7 = %x\n", p->universal_7);
 		eicon_log(ccard, 128, "rT30:station_id_len = %x\n", p->station_id_len);
 		eicon_log(ccard, 128, "rT30:head_line_len = %x\n", p->head_line_len);
-		strncpy(st, p->station_id, p->station_id_len);
-		st[p->station_id_len] = 0;
+		strlcpy(st, p->station_id, p->station_id_len + 1);
 		eicon_log(ccard, 128, "rT30:station_id = <%s>\n", st);
 	}
 	if (!chan->fax) {
@@ -2221,7 +2207,10 @@ idi_parse_udata(eicon_card *ccard, eicon_chan *chan, unsigned char *buffer, int 
         static char *connmsg[] =
         {"", "V.21", "V.23", "V.22", "V.22bis", "V.32bis", "V.34",
          "V.8", "Bell 212A", "Bell 103", "V.29 Leased", "V.33 Leased", "V.90",
-         "V.21 CH2", "V.27ter", "V.29", "V.33", "V.17"};
+         "V.21 CH2", "V.27ter", "V.29", "V.33", "V.17", "V.32", "K56Flex",
+         "X2", "V.18", "V.18LH", "V.18HL", "V.21LH", "V.21HL",
+         "Bell 103LH", "Bell 103HL", "V.23", "V.23", "EDT 110",
+         "Baudot45", "Baudot47", "Baudot50", "DTMF" };
 	static u_char dtmf_code[] = {
 	'1','4','7','*','2','5','8','0','3','6','9','#','A','B','C','D'
 	};
@@ -2243,7 +2232,11 @@ idi_parse_udata(eicon_card *ccard, eicon_chan *chan, unsigned char *buffer, int 
 				cmd.driver = ccard->myid;
 				cmd.command = ISDN_STAT_BCONN;
 				cmd.arg = chan->No;
-				sprintf(cmd.parm.num, "%d/%s", p->speed, connmsg[p->norm]);
+                                if (p->norm > 34) {
+                                  sprintf(cmd.parm.num, "%d/(%d)", p->speed, p->norm);
+                                } else {
+                                  sprintf(cmd.parm.num, "%d/%s", p->speed, connmsg[p->norm]);
+                                }
 				ccard->interface.statcallb(&cmd);
 			}
 			eicon_log(ccard, 8, "idi_ind: Ch%d: UDATA_DCD_ON time %d\n", chan->No, p->time);
@@ -2506,7 +2499,7 @@ idi_handle_ind(eicon_card *ccard, struct sk_buff *skb)
 						case ISDN_PROTO_L2_TRANS:
 							idi_do_req(ccard, chan, N_CONNECT, 1);
 							break;
-						default:
+						default:;
 							/* On most incoming calls we use automatic connect */
 							/* idi_do_req(ccard, chan, N_CONNECT, 1); */
 					}
@@ -2722,7 +2715,7 @@ idi_handle_ack_ok(eicon_card *ccard, eicon_chan *chan, eicon_RC *ack)
 	int twaitpq = 0;
 
 	if (ack->RcId != ((chan->e.ReqCh) ? chan->e.B2Id : chan->e.D3Id)) {
-		/* I dont know why this happens, should not ! */
+		/* I don't know why this happens, should not ! */
 		/* just ignoring this RC */
 		eicon_log(ccard, 16, "idi_ack: Ch%d: RcId %d not equal to last %d\n", chan->No, 
 			ack->RcId, (chan->e.ReqCh) ? chan->e.B2Id : chan->e.D3Id);
@@ -2976,7 +2969,7 @@ idi_send_data(eicon_card *card, eicon_chan *chan, int ack, struct sk_buff *skb, 
 			spin_unlock_irqrestore(&eicon_lock, flags);
         	        eicon_log(card, 1, "idi_err: Ch%d: alloc_skb failed in send_data()\n", chan->No);
 			if (xmit_skb) 
-				dev_kfree_skb(skb);
+				dev_kfree_skb(xmit_skb);
 			if (skb2) 
 				dev_kfree_skb(skb2);
                 	return -ENOMEM;
@@ -3102,7 +3095,7 @@ eicon_idi_manage(eicon_card *card, eicon_manifbuf *mb)
 {
 	int l = 0;
 	int ret = 0;
-	int timeout;
+	unsigned long timeout;
 	int i;
         struct sk_buff *skb;
         struct sk_buff *skb2;
@@ -3123,8 +3116,8 @@ eicon_idi_manage(eicon_card *card, eicon_manifbuf *mb)
 			return(ret); 
 		}
 
-	        timeout = jiffies + 50;
-        	while (timeout > jiffies) {
+	        timeout = jiffies + HZ / 2;
+        	while (time_before(jiffies, timeout)) {
 	                if (chan->e.B2Id) break;
         	        SLEEP(10);
 	        }
@@ -3185,8 +3178,8 @@ eicon_idi_manage(eicon_card *card, eicon_manifbuf *mb)
 
         eicon_schedule_tx(card);
 
-        timeout = jiffies + 50;
-        while (timeout > jiffies) {
+        timeout = jiffies + HZ / 2;
+        while (time_before(jiffies, timeout)) {
                 if (chan->fsm_state) break;
                 SLEEP(10);
         }

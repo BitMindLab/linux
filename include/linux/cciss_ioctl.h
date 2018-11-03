@@ -33,6 +33,18 @@ typedef __u32 BusTypes_type;
 typedef char FirmwareVer_type[4];
 typedef __u32 DriverVer_type;
 
+#define MAX_KMALLOC_SIZE 128000
+
+typedef struct _BIG_IOCTL_Command_struct {
+  LUNAddr_struct	   LUN_info;
+  RequestBlock_struct      Request;
+  ErrorInfo_struct  	   error_info; 
+  DWORD			   malloc_size; /* < MAX_KMALLOC_SIZE in cciss.c */
+  DWORD			   buf_size;    /* size in bytes of the buf */
+  				        /* < malloc_size * MAXSGENTRIES */
+  BYTE			   *buf;
+} BIG_IOCTL_Command_struct;
+
 
 #ifndef CCISS_CMD_H
 // This defines are duplicated in cciss_cmd.h in the driver directory 
@@ -80,25 +92,28 @@ typedef __u32 DriverVer_type;
 
 #define CISS_MAX_LUN	16	
 
+#define LEVEL2LUN   1   // index into Target(x) structure, due to byte swapping
+#define LEVEL3LUN   0
+
 #pragma pack(1)
 
 //Command List Structure
 typedef union _SCSI3Addr_struct {
    struct {
+    BYTE Dev;
     BYTE Bus:6;
     BYTE Mode:2;        // b00
-    BYTE Dev;
   } PeripDev;
    struct {
+    BYTE DevLSB;
     BYTE DevMSB:6;
     BYTE Mode:2;        // b01
-    BYTE DevLSB;
   } LogDev;
    struct {
-    BYTE Targ:6;
-    BYTE Mode:2;        // b10
     BYTE Dev:5;
     BYTE Bus:3;
+    BYTE Targ:6;
+    BYTE Mode:2;        // b10
   } LogUnit;
 } SCSI3Addr_struct;
 
@@ -166,6 +181,11 @@ typedef struct _IOCTL_Command_struct {
   BYTE			   *buf;
 } IOCTL_Command_struct;
 
+typedef struct _LogvolInfo_struct{
+	__u32	LunID;
+	int	num_opens;  /* number of opens on the logical volume */
+	int	num_parts;  /* number of partitions configured on logvol */
+} LogvolInfo_struct;
 
 #define CCISS_GETPCIINFO _IOR(CCISS_IOC_MAGIC, 1, cciss_pci_info_struct)
 
@@ -181,6 +201,13 @@ typedef struct _IOCTL_Command_struct {
 #define CCISS_GETDRIVVER   _IOR(CCISS_IOC_MAGIC, 9, DriverVer_type)
 #define CCISS_REVALIDVOLS  _IO(CCISS_IOC_MAGIC, 10)
 #define CCISS_PASSTHRU	   _IOWR(CCISS_IOC_MAGIC, 11, IOCTL_Command_struct)
+#define CCISS_DEREGDISK	   _IO(CCISS_IOC_MAGIC, 12)
 
+/* no longer used... use REGNEWD instead */ 
+#define CCISS_REGNEWDISK  _IOW(CCISS_IOC_MAGIC, 13, int)
+
+#define CCISS_REGNEWD	   _IO(CCISS_IOC_MAGIC, 14)
+#define CCISS_GETLUNINFO   _IOR(CCISS_IOC_MAGIC, 17, LogvolInfo_struct)
+#define CCISS_BIG_PASSTHRU _IOWR(CCISS_IOC_MAGIC, 18, BIG_IOCTL_Command_struct)
 
 #endif  

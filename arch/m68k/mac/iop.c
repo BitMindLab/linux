@@ -28,7 +28,7 @@
  *		  globally-visible functions take an IOP number instead of an
  *		  an actual base address.
  * 990610 (jmt) - Finished the message passing framework and it seems to work.
- *		  Sending _definately_ works; my adb-bus.c mods can send
+ *		  Sending _definitely_ works; my adb-bus.c mods can send
  *		  messages and receive the MSG_COMPLETED status back from the
  *		  IOP. The trick now is figuring out the message formats.
  * 990611 (jmt) - More cleanups. Fixed problem where unclaimed messages on a
@@ -51,9 +51,6 @@
  *   IOP hasn't died.
  * o Some of the IOP manager routines need better error checking and
  *   return codes. Nothing major, just prettying up.
- *
- * + share the stuff you were smoking when you wrote the iop_get_proc_info()
- *   for case when CONFIG_PROC_FS is undefined.
  */
 
 /*
@@ -114,6 +111,7 @@
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/proc_fs.h>
+#include <linux/interrupt.h>
 
 #include <asm/bootinfo.h> 
 #include <asm/macintosh.h> 
@@ -129,9 +127,6 @@ int iop_scc_present,iop_ism_present;
 
 #ifdef CONFIG_PROC_FS
 static int iop_get_proc_info(char *, char **, off_t, int);
-#else
-/* What the bloody hell is THAT ??? */
-static int iop_get_proc_info(char *, char **, off_t, int) {}
 #endif /* CONFIG_PROC_FS */
 
 /* structure for tracking channel listeners */
@@ -158,7 +153,7 @@ static struct iop_msg iop_msg_pool[NUM_IOP_MSGS];
 static struct iop_msg *iop_send_queue[NUM_IOPS][NUM_IOP_CHAN];
 static struct listener iop_listeners[NUM_IOPS][NUM_IOP_CHAN];
 
-void iop_ism_irq(int, void *, struct pt_regs *);
+irqreturn_t iop_ism_irq(int, void *, struct pt_regs *);
 
 extern void oss_irq_enable(int);
 
@@ -218,20 +213,19 @@ static int iop_alive(volatile struct mac_iop *iop)
 static struct iop_msg *iop_alloc_msg(void)
 {
 	int i;
-	ulong cpu_flags;
+	unsigned long flags;
 
-	save_flags(cpu_flags);
-	cli();
+	local_irq_save(flags);
 
 	for (i = 0 ; i < NUM_IOP_MSGS ; i++) {
 		if (iop_msg_pool[i].status == IOP_MSGSTATUS_UNUSED) {
 			iop_msg_pool[i].status = IOP_MSGSTATUS_WAITING;
-			restore_flags(cpu_flags);
+			local_irq_restore(flags);
 			return &iop_msg_pool[i];
 		}
 	}
 
-	restore_flags(cpu_flags);
+	local_irq_restore(flags);
 	return NULL;
 }
 
@@ -242,7 +236,7 @@ static void iop_free_msg(struct iop_msg *msg)
 
 /*
  * This is called by the startup code before anything else. Its purpose
- * is to find and initalize the IOPs early in the boot sequence, so that
+ * is to find and initialize the IOPs early in the boot sequence, so that
  * the serial IOP can be placed into bypass mode _before_ we try to
  * initialize the serial console.
  */
@@ -307,7 +301,11 @@ void __init iop_init(void)
 		iop_listeners[IOP_NUM_ISM][i].handler = NULL;
 	}
 
-	create_proc_info_entry("mac_iop",0,0,iop_get_proc_info);
+#if 0	/* Crashing in 2.4 now, not yet sure why.   --jmt */
+#ifdef CONFIG_PROC_FS
+	create_proc_info_entry("mac_iop", 0, &proc_root, iop_get_proc_info);
+#endif
+#endif
 }
 
 /*
@@ -587,7 +585,7 @@ __u8 *iop_compare_code(uint iop_num, __u8 *code_start,
  * Handle an ISM IOP interrupt
  */
 
-void iop_ism_irq(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t iop_ism_irq(int irq, void *dev_id, struct pt_regs *regs)
 {
 	uint iop_num = (uint) dev_id;
 	volatile struct mac_iop *iop = iop_base[iop_num];
@@ -638,7 +636,7 @@ void iop_ism_irq(int irq, void *dev_id, struct pt_regs *regs)
 		printk("\n");
 #endif
 	}
-
+	return IRQ_HANDLED;
 }
 
 #ifdef CONFIG_PROC_FS

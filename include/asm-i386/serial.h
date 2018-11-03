@@ -27,11 +27,10 @@
 #define ACCENT_FLAGS 0
 #define BOCA_FLAGS 0
 #define HUB6_FLAGS 0
-#define RS_TABLE_SIZE	64
-#else
-#define RS_TABLE_SIZE
 #endif
-	
+
+#define MCA_COM_FLAGS	(STD_COM_FLAGS|ASYNC_BOOT_ONLYMCA)
+
 /*
  * The following define the access methods for the HUB6 card. All
  * access is through two ports for all 24 possible chips. The card is
@@ -48,12 +47,19 @@
 
 #define C_P(card,port) (((card)<<6|(port)<<3) + 1)
 
+#ifndef CONFIG_X86_PC9800
 #define STD_SERIAL_PORT_DEFNS			\
 	/* UART CLK   PORT IRQ     FLAGS        */			\
 	{ 0, BASE_BAUD, 0x3F8, 4, STD_COM_FLAGS },	/* ttyS0 */	\
 	{ 0, BASE_BAUD, 0x2F8, 3, STD_COM_FLAGS },	/* ttyS1 */	\
 	{ 0, BASE_BAUD, 0x3E8, 4, STD_COM_FLAGS },	/* ttyS2 */	\
 	{ 0, BASE_BAUD, 0x2E8, 3, STD_COM4_FLAGS },	/* ttyS3 */
+#else
+#define STD_SERIAL_PORT_DEFNS			\
+	/* UART CLK   PORT IRQ     FLAGS        */			\
+	{ 0, BASE_BAUD, 0x30, 4, STD_COM_FLAGS },	/* ttyS0 */	\
+	{ 0, BASE_BAUD, 0x238, 5, STD_COM_FLAGS },	/* ttyS1 */
+#endif /* CONFIG_X86_PC9800 */
 
 
 #ifdef CONFIG_SERIAL_MANY_PORTS
@@ -113,12 +119,12 @@
 
 #ifdef CONFIG_MCA
 #define MCA_SERIAL_PORT_DFNS			\
-	{ 0, BASE_BAUD, 0x3220, 3, STD_COM_FLAGS },	\
-	{ 0, BASE_BAUD, 0x3228, 3, STD_COM_FLAGS },	\
-	{ 0, BASE_BAUD, 0x4220, 3, STD_COM_FLAGS },	\
-	{ 0, BASE_BAUD, 0x4228, 3, STD_COM_FLAGS },	\
-	{ 0, BASE_BAUD, 0x5220, 3, STD_COM_FLAGS },	\
-	{ 0, BASE_BAUD, 0x5228, 3, STD_COM_FLAGS },
+	{ 0, BASE_BAUD, 0x3220, 3, MCA_COM_FLAGS },	\
+	{ 0, BASE_BAUD, 0x3228, 3, MCA_COM_FLAGS },	\
+	{ 0, BASE_BAUD, 0x4220, 3, MCA_COM_FLAGS },	\
+	{ 0, BASE_BAUD, 0x4228, 3, MCA_COM_FLAGS },	\
+	{ 0, BASE_BAUD, 0x5220, 3, MCA_COM_FLAGS },	\
+	{ 0, BASE_BAUD, 0x5228, 3, MCA_COM_FLAGS },
 #else
 #define MCA_SERIAL_PORT_DFNS
 #endif

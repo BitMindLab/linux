@@ -1,4 +1,4 @@
-/* $Id: eicon_io.c,v 1.13 2000/05/07 08:51:04 armin Exp $
+/* $Id: eicon_io.c,v 1.1.4.1.2.2 2002/10/01 11:29:13 armin Exp $
  *
  * ISDN low-level module for Eicon active ISDN-Cards.
  * Code for communicating with hardware.
@@ -6,25 +6,13 @@
  * Copyright 1999,2000  by Armin Schindler (mac@melware.de)
  * Copyright 1999,2000  Cytronics & Melware (info@melware.de)
  *
- * Thanks to	Eicon Technology GmbH & Co. oHG for 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
+ * Thanks to	Eicon Networks for 
  *		documents, informations and hardware. 
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
- *
  */
-
 
 #include <linux/config.h>
 #include "eicon.h"
@@ -513,7 +501,7 @@ eicon_io_transmit(eicon_card *ccard) {
 /*
  * IRQ handler 
  */
-void
+irqreturn_t
 eicon_irq(int irq, void *dev_id, struct pt_regs *regs) {
 	eicon_card *ccard = (eicon_card *)dev_id;
         eicon_isa_card *isa_card;
@@ -533,7 +521,7 @@ eicon_irq(int irq, void *dev_id, struct pt_regs *regs) {
 
         if (!ccard) {
                 eicon_log(ccard, 1, "eicon_irq: spurious interrupt %d\n", irq);
-                return;
+                return IRQ_NONE;
         }
 
 	if (ccard->type == EICON_CTYPE_QUADRO) {
@@ -566,7 +554,7 @@ eicon_irq(int irq, void *dev_id, struct pt_regs *regs) {
 			break;
 		default:
                 	eicon_log(ccard, 1, "eicon_irq: unsupported card-type!\n");
-			return;
+			return IRQ_NONE;
 	}
 
 	if (*irqprobe) {
@@ -589,7 +577,7 @@ eicon_irq(int irq, void *dev_id, struct pt_regs *regs) {
 				(*irqprobe)++;
 				break;
 		}
-		return;
+		return IRQ_HANDLED;
 	}
 
 	switch(ccard->type) {
@@ -600,7 +588,7 @@ eicon_irq(int irq, void *dev_id, struct pt_regs *regs) {
 		case EICON_CTYPE_S2M:
 			if (!(readb(isa_card->intack))) { /* card did not interrupt */
 				eicon_log(ccard, 1, "eicon: IRQ: card reports no interrupt!\n");
-				return;
+				return IRQ_NONE;
 			} 
 			break;
 	}
@@ -756,6 +744,6 @@ eicon_irq(int irq, void *dev_id, struct pt_regs *regs) {
 			break;
 	}
 
-  return;
+  return IRQ_HANDLED;
 }
 #endif

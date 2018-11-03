@@ -9,17 +9,30 @@
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/msdos_fs.h>
 #include <linux/umsdos_fs.h>
 #include <linux/dcache.h>
 #include <linux/pagemap.h>
+#include <linux/delay.h>
 
-#include <asm/delay.h>
+void put_entry (struct umsdos_dirent *p, struct umsdos_dirent *q)
+{
+	p->name_len = q->name_len;
+	p->flags = q->flags;
+	p->nlink = cpu_to_le16(q->nlink);
+	p->uid = cpu_to_le16(q->uid);
+	p->gid = cpu_to_le16(q->gid);
+	p->atime = cpu_to_le32(q->atime);
+	p->mtime = cpu_to_le32(q->mtime);
+	p->ctime = cpu_to_le32(q->ctime);
+	p->rdev = cpu_to_le16(q->rdev);
+	p->mode = cpu_to_le16(q->mode);
+}
 
-static void copy_entry(struct umsdos_dirent *p, struct umsdos_dirent *q)
+static void get_entry(struct umsdos_dirent *p, struct umsdos_dirent *q)
 {
 	p->name_len = q->name_len;
 	p->name[p->name_len]='\0';
@@ -92,7 +105,7 @@ int umsdos_make_emd(struct dentry *parent)
 Printk(("umsdos_make_emd: creating EMD %s/%s\n",
 parent->d_name.name, demd->d_name.name));
 
-	err = msdos_create(parent->d_inode, demd, S_IFREG | 0777);
+	err = msdos_create(parent->d_inode, demd, S_IFREG | 0777, NULL);
 	if (err) {
 		printk (KERN_WARNING
 			"umsdos_make_emd: create %s/%s failed, err=%d\n",
@@ -126,8 +139,8 @@ int umsdos_emd_dir_readentry (struct dentry *demd, loff_t *pos, struct umsdos_di
 			(filler_t*)mapping->a_ops->readpage, NULL);
 	if (IS_ERR(page))
 		goto sync_fail;
-	wait_on_page(page);
-	if (!Page_Uptodate(page))
+	wait_on_page_locked(page);
+	if (!PageUptodate(page))
 		goto async_fail;
 	p = (struct umsdos_dirent*)(kmap(page)+offs);
 
@@ -137,6 +150,7 @@ int umsdos_emd_dir_readentry (struct dentry *demd, loff_t *pos, struct umsdos_di
 		printk (KERN_WARNING "Ignoring invalid EMD entry with size %d\n", entry->name_len);
 		p->name_len = 0; 
 		ret = -ENAMETOOLONG; /* notify umssync(8) code that something is wrong */
+		/* FIXME: does not work if we did 'ls -l' before 'udosctl uls' ?! */
 	}
 
 	recsize = umsdos_evalrecsize(p->name_len);
@@ -151,8 +165,8 @@ int umsdos_emd_dir_readentry (struct dentry *demd, loff_t *pos, struct umsdos_di
 			page = page2;
 			goto sync_fail;
 		}
-		wait_on_page(page2);
-		if (!Page_Uptodate(page2)) {
+		wait_on_page_locked(page2);
+		if (!PageUptodate(page2)) {
 			kunmap(page);
 			page_cache_release(page2);
 			goto async_fail;
@@ -164,7 +178,7 @@ int umsdos_emd_dir_readentry (struct dentry *demd, loff_t *pos, struct umsdos_di
 		page_cache_release(page2);
 	} else
 		memcpy(entry->spare,p->spare,((char*)p+recsize)-p->spare);
-	copy_entry(entry, p);
+	get_entry(entry, p);
 	kunmap(page);
 	page_cache_release(page);
 	*pos += recsize;
@@ -250,20 +264,11 @@ int umsdos_writeentry (struct dentry *parent, struct umsdos_info *info,
 					offs+info->recsize-PAGE_CACHE_SIZE);
 		if (ret)
 			goto out_unlock3;
-		p->name_len = entry->name_len;
-		p->flags = entry->flags;
-		p->nlink = cpu_to_le16(entry->nlink);
-		p->uid = cpu_to_le16(entry->uid);
-		p->gid = cpu_to_le16(entry->gid);
-		p->atime = cpu_to_le32(entry->atime);
-		p->mtime = cpu_to_le32(entry->mtime);
-		p->ctime = cpu_to_le32(entry->ctime);
-		p->rdev = cpu_to_le16(entry->rdev);
-		p->mode = cpu_to_le16(entry->mode);
-		memcpy(p->name,entry->name,
+		put_entry (p, entry);
+		memcpy(p->spare,entry->spare,
 			(char *)(page_address(page) + PAGE_CACHE_SIZE) - p->spare);
 		memcpy(page_address(page2),
-				entry->spare+PAGE_CACHE_SIZE-offs,
+				((char*)entry)+PAGE_CACHE_SIZE-offs,
 				offs+info->recsize-PAGE_CACHE_SIZE);
 		ret = mapping->a_ops->commit_write(NULL,page2,0,
 					offs+info->recsize-PAGE_CACHE_SIZE);
@@ -271,7 +276,7 @@ int umsdos_writeentry (struct dentry *parent, struct umsdos_info *info,
 			goto out_unlock3;
 		ret = mapping->a_ops->commit_write(NULL,page,offs,
 					PAGE_CACHE_SIZE);
-		UnlockPage(page2);
+		unlock_page(page2);
 		page_cache_release(page2);
 		if (ret)
 			goto out_unlock;
@@ -280,23 +285,14 @@ int umsdos_writeentry (struct dentry *parent, struct umsdos_info *info,
 					offs + info->recsize);
 		if (ret)
 			goto out_unlock;
-		p->name_len = entry->name_len;
-		p->flags = entry->flags;
-		p->nlink = cpu_to_le16(entry->nlink);
-		p->uid = cpu_to_le16(entry->uid);
-		p->gid = cpu_to_le16(entry->gid);
-		p->atime = cpu_to_le32(entry->atime);
-		p->mtime = cpu_to_le32(entry->mtime);
-		p->ctime = cpu_to_le32(entry->ctime);
-		p->rdev = cpu_to_le16(entry->rdev);
-		p->mode = cpu_to_le16(entry->mode);
+		put_entry (p, entry);
 		memcpy(p->spare,entry->spare,((char*)p+info->recsize)-p->spare);
 		ret = mapping->a_ops->commit_write(NULL,page,offs,
 					offs + info->recsize);
 		if (ret)
 			goto out_unlock;
 	}
-	UnlockPage(page);
+	unlock_page(page);
 	page_cache_release(page);
 		
 	dir->i_ctime = dir->i_mtime = CURRENT_TIME;
@@ -308,13 +304,13 @@ out:
 	Printk (("umsdos_writeentry /mn/: returning %d...\n", ret));
 	return ret;
 out_unlock3:
-	UnlockPage(page2);
+	unlock_page(page2);
 	page_cache_release(page2);
 out_unlock2:
 	ClearPageUptodate(page);
 	kunmap(page);
 out_unlock:
-	UnlockPage(page);
+	unlock_page(page);
 	page_cache_release(page);
 	printk ("UMSDOS:  problem with EMD file:  can't write\n");
 	goto out_dput;
@@ -396,8 +392,8 @@ static int umsdos_find (struct dentry *demd, struct umsdos_info *info)
 			page = read_cache_page(mapping,index,readpage,NULL);
 			if (IS_ERR(page))
 				goto sync_fail;
-			wait_on_page(page);
-			if (!Page_Uptodate(page))
+			wait_on_page_locked(page);
+			if (!PageUptodate(page))
 				goto async_fail;
 			p = kmap(page);
 		}
@@ -445,8 +441,8 @@ static int umsdos_find (struct dentry *demd, struct umsdos_info *info)
 				page = next_page;
 				goto sync_fail;
 			}
-			wait_on_page(next_page);
-			if (!Page_Uptodate(next_page)) {
+			wait_on_page_locked(next_page);
+			if (!PageUptodate(next_page)) {
 				page_cache_release(page);
 				page = next_page;
 				goto async_fail;
@@ -464,7 +460,7 @@ static int umsdos_find (struct dentry *demd, struct umsdos_info *info)
 			goto skip_it;
 
 		info->f_pos = pos;
-		copy_entry(entry, rentry);
+		get_entry(entry, rentry);
 		ret = 0;
 		break;
 skip_it:

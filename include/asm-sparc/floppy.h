@@ -96,8 +96,6 @@ static struct sun_floppy_ops sun_fdops;
  */
 #define FDC1                      sun_floppy_init()
 
-static int FDC2=-1;
-
 #define N_FDC    1
 #define N_DRIVE  8
 
@@ -117,7 +115,7 @@ static unsigned char sun_82072_fd_inb(int port)
 	case 5: /* FD_DATA */
 		return sun_fdc->data_82072;
 	case 7: /* FD_DIR */
-		return (*AUXREG & AUXIO_FLPY_DCHG)? 0x80: 0;
+		return (get_auxio() & AUXIO_FLPY_DCHG)? 0x80: 0;
 	};
 	panic("sun_82072_fd_inb: How did I get here?");
 }
@@ -339,7 +337,7 @@ static int sun_floppy_init(void)
                 sun_fdops.fd_inb = sun_82072_fd_inb;
                 sun_fdops.fd_outb = sun_82072_fd_outb;
                 fdc_status = &sun_fdc->status_82072;
-                /* printk("AUXIO @0x%p\n", auxio_register); */ /* P3 */
+                /* printk("AUXIO @0x%lx\n", auxio_register); */ /* P3 */
         } else {
                 sun_fdops.fd_inb = sun_82077_fd_inb;
                 sun_fdops.fd_outb = sun_82077_fd_outb;
@@ -365,5 +363,7 @@ static int sparc_eject(void)
 }
 
 #define fd_eject(drive) sparc_eject()
+
+#define EXTRA_FLOPPY_PARAMS
 
 #endif /* !(__ASM_SPARC_FLOPPY_H) */

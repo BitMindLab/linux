@@ -1,4 +1,4 @@
-/* $Id: bitops.S,v 1.1 2000/03/27 10:38:41 davem Exp $
+/* $Id: bitops.S,v 1.3 2001/11/18 00:12:56 davem Exp $
  * bitops.S: Sparc64 atomic bit operations.
  *
  * Copyright (C) 2000 David S. Miller (davem@redhat.com)
@@ -11,8 +11,8 @@
 	.globl	__bitops_begin
 __bitops_begin:
 
-	.globl	__test_and_set_bit
-__test_and_set_bit:	/* %o0=nr, %o1=addr */
+	.globl	___test_and_set_bit
+___test_and_set_bit:	/* %o0=nr, %o1=addr */
 	srlx	%o0, 6, %g1
 	mov	1, %g5
 	sllx	%g1, 3, %g3
@@ -28,10 +28,10 @@ __test_and_set_bit:	/* %o0=nr, %o1=addr */
 	bne,a,pn %xcc, 1b
 	 ldx	[%o1], %g7
 2:	retl
-	 nop
+	 membar	#StoreLoad | #StoreStore
 
-	.globl	__test_and_clear_bit
-__test_and_clear_bit:	/* %o0=nr, %o1=addr */
+	.globl	___test_and_clear_bit
+___test_and_clear_bit:	/* %o0=nr, %o1=addr */
 	srlx	%o0, 6, %g1
 	mov	1, %g5
 	sllx	%g1, 3, %g3
@@ -47,10 +47,10 @@ __test_and_clear_bit:	/* %o0=nr, %o1=addr */
 	bne,a,pn %xcc, 1b
 	 ldx	[%o1], %g7
 2:	retl
-	 nop
+	 membar	#StoreLoad | #StoreStore
 
-	.globl	__test_and_change_bit
-__test_and_change_bit:	/* %o0=nr, %o1=addr */
+	.globl	___test_and_change_bit
+___test_and_change_bit:	/* %o0=nr, %o1=addr */
 	srlx	%o0, 6, %g1
 	mov	1, %g5
 	sllx	%g1, 3, %g3
@@ -65,11 +65,11 @@ __test_and_change_bit:	/* %o0=nr, %o1=addr */
 	bne,a,pn %xcc, 1b
 	 ldx	[%o1], %g7
 2:	retl
-	 nop
+	 membar	#StoreLoad | #StoreStore
 	nop
 
-	.globl	__test_and_set_le_bit
-__test_and_set_le_bit:	/* %o0=nr, %o1=addr */
+	.globl	___test_and_set_le_bit
+___test_and_set_le_bit:	/* %o0=nr, %o1=addr */
 	srlx	%o0, 5, %g1
 	mov	1, %g5
 	sllx	%g1, 2, %g3
@@ -85,10 +85,10 @@ __test_and_set_le_bit:	/* %o0=nr, %o1=addr */
 	bne,a,pn %icc, 1b
 	 lduwa	[%o1] ASI_PL, %g7
 2:	retl
-	 nop
+	 membar	#StoreLoad | #StoreStore
 
-	.globl	__test_and_clear_le_bit
-__test_and_clear_le_bit:	/* %o0=nr, %o1=addr */
+	.globl	___test_and_clear_le_bit
+___test_and_clear_le_bit:	/* %o0=nr, %o1=addr */
 	srlx	%o0, 5, %g1
 	mov	1, %g5
 	sllx	%g1, 2, %g3
@@ -104,7 +104,7 @@ __test_and_clear_le_bit:	/* %o0=nr, %o1=addr */
 	bne,a,pn %icc, 1b
 	 lduwa	[%o1] ASI_PL, %g7
 2:	retl
-	 nop
+	 membar	#StoreLoad | #StoreStore
 
 	.globl	__bitops_end
 __bitops_end:

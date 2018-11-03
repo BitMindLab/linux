@@ -6,7 +6,7 @@
 #include <linux/icmp.h>
 #include <linux/netfilter_ipv4/ip_conntrack_protocol.h>
 
-#define ICMP_TIMEOUT (30*HZ)
+unsigned long ip_ct_icmp_timeout = 30*HZ;
 
 #if 0
 #define DEBUGP printk
@@ -14,14 +14,18 @@
 #define DEBUGP(format, args...)
 #endif
 
-static int icmp_pkt_to_tuple(const void *datah, size_t datalen,
+static int icmp_pkt_to_tuple(const struct sk_buff *skb,
+			     unsigned int dataoff,
 			     struct ip_conntrack_tuple *tuple)
 {
-	const struct icmphdr *hdr = datah;
+	struct icmphdr hdr;
 
-	tuple->dst.u.icmp.type = hdr->type;
-	tuple->src.u.icmp.id = hdr->un.echo.id;
-	tuple->dst.u.icmp.code = hdr->code;
+	if (skb_copy_bits(skb, dataoff, &hdr, sizeof(hdr)) != 0)
+		return 0;
+
+	tuple->dst.u.icmp.type = hdr.type;
+	tuple->src.u.icmp.id = hdr.un.echo.id;
+	tuple->dst.u.icmp.code = hdr.code;
 
 	return 1;
 }
@@ -69,25 +73,28 @@ static unsigned int icmp_print_conntrack(char *buffer,
 
 /* Returns verdict for packet, or -1 for invalid. */
 static int icmp_packet(struct ip_conntrack *ct,
-		       struct iphdr *iph, size_t len,
+		       const struct sk_buff *skb,
 		       enum ip_conntrack_info ctinfo)
 {
-	/* FIXME: Should keep count of orig - reply packets: if == 0,
-           destroy --RR */
-	/* Delete connection immediately on reply: won't actually
-           vanish as we still have skb */
+	/* Try to delete connection immediately after all replies:
+           won't actually vanish as we still have skb, and del_timer
+           means this will only run once even if count hits zero twice
+           (theoretically possible with SMP) */
 	if (CTINFO2DIR(ctinfo) == IP_CT_DIR_REPLY) {
-		if (del_timer(&ct->timeout))
+		if (atomic_dec_and_test(&ct->proto.icmp.count)
+		    && del_timer(&ct->timeout))
 			ct->timeout.function((unsigned long)ct);
-	} else
-		ip_ct_refresh(ct, ICMP_TIMEOUT);
+	} else {
+		atomic_inc(&ct->proto.icmp.count);
+		ip_ct_refresh(ct, ip_ct_icmp_timeout);
+	}
 
 	return NF_ACCEPT;
 }
 
 /* Called when a new connection for this protocol found. */
-static unsigned long icmp_new(struct ip_conntrack *conntrack,
-			      struct iphdr *iph, size_t len)
+static int icmp_new(struct ip_conntrack *conntrack,
+		    const struct sk_buff *skb)
 {
 	static u_int8_t valid_new[]
 		= { [ICMP_ECHO] = 1,
@@ -103,10 +110,11 @@ static unsigned long icmp_new(struct ip_conntrack *conntrack,
 		DUMP_TUPLE(&conntrack->tuplehash[0].tuple);
 		return 0;
 	}
-	return ICMP_TIMEOUT;
+	atomic_set(&conntrack->proto.icmp.count, 0);
+	return 1;
 }
 
 struct ip_conntrack_protocol ip_conntrack_protocol_icmp
 = { { NULL, NULL }, IPPROTO_ICMP, "icmp",
     icmp_pkt_to_tuple, icmp_invert_tuple, icmp_print_tuple,
-    icmp_print_conntrack, icmp_packet, icmp_new, NULL };
+    icmp_print_conntrack, icmp_packet, icmp_new, NULL, NULL, NULL };

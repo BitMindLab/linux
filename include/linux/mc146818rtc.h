@@ -13,6 +13,7 @@
 
 #include <asm/io.h>
 #include <linux/rtc.h>			/* get the user-level API */
+#include <linux/spinlock.h>		/* spinlock_t */
 #include <asm/mc146818rtc.h>		/* register access macros */
 
 extern spinlock_t rtc_lock;		/* serialize CMOS RAM access */
@@ -85,16 +86,5 @@ extern spinlock_t rtc_lock;		/* serialize CMOS RAM access */
 #define RTC_VALID	RTC_REG_D
 # define RTC_VRT 0x80		/* valid RAM and time */
 /**********************************************************************/
-
-/* example: !(CMOS_READ(RTC_CONTROL) & RTC_DM_BINARY) 
- * determines if the following two #defines are needed
- */
-#ifndef BCD_TO_BIN
-#define BCD_TO_BIN(val) ((val)=((val)&15) + ((val)>>4)*10)
-#endif
-
-#ifndef BIN_TO_BCD
-#define BIN_TO_BCD(val) ((val)=(((val)/10)<<4) + (val)%10)
-#endif
 
 #endif /* _MC146818RTC_H */

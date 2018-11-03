@@ -15,10 +15,6 @@
 #include <asm/mach-types.h>
 
 
-#define PCMCIA_IO_0_BASE 0xe0000000
-#define PCMCIA_IO_1_BASE 0xe4000000
-
-
 /*
  * Set up a hw structure for a specified data port, control port and IRQ.
  * This should follow whatever the default interface uses.
@@ -53,8 +49,9 @@ ide_init_hwif_ports(hw_regs_t *hw, int data_port, int ctrl_port, int *irq)
 		*irq = 0;
 }
 
-
-
+#ifdef CONFIG_SA1100_TRIZEPS
+#include <asm/arch/trizeps.h>
+#endif
 
 /*
  * This registers the standard ports for this architecture with the IDE
@@ -88,10 +85,10 @@ ide_init_default_hwifs(void)
 	   doesn't match the silkscreen however. */
 	ide_init_hwif_ports(&hw, PCMCIA_IO_0_BASE + 0x40, PCMCIA_IO_0_BASE + 0x78, NULL);
 	hw.irq = EMPEG_IRQ_IDE2;
-	ide_register_hw(&hw, NULL);
+	ide_register_hw(&hw);
 	ide_init_hwif_ports(&hw, PCMCIA_IO_0_BASE + 0x00, PCMCIA_IO_0_BASE + 0x38, NULL);
 	hw.irq = ,EMPEG_IRQ_IDE1;
-	ide_register_hw(&hw, NULL);
+	ide_register_hw(&hw);
 #endif
     }
 
@@ -108,7 +105,7 @@ ide_init_default_hwifs(void)
 
 	ide_init_hwif_ports(&hw, PCMCIA_IO_0_BASE + 0x1f0, PCMCIA_IO_0_BASE + 0x3f6, NULL);
 	hw.irq = IRQ_GPIO7;
-	ide_register_hw(&hw, NULL);
+	ide_register_hw(&hw);
 #endif
     }
     else if (machine_is_lart()) {
@@ -116,18 +113,35 @@ ide_init_default_hwifs(void)
         hw_regs_t hw;
 
         /* Enable GPIO as interrupt line */
-        GPDR &= ~GPIO_GPIO1;
-        set_GPIO_IRQ_edge(GPIO_GPIO1, GPIO_RISING_EDGE);
-        
+        GPDR &= ~LART_GPIO_IDE;
+	set_irq_type(LART_IRQ_IDE, IRQT_RISING);
+
         /* set PCMCIA interface timing */
         MECR = 0x00060006;
 
         /* init the interface */
 	ide_init_hwif_ports(&hw, PCMCIA_IO_0_BASE + 0x0000, PCMCIA_IO_0_BASE + 0x1000, NULL);
-        hw.irq = IRQ_GPIO1;
-        ide_register_hw(&hw, NULL);
+        hw.irq = LART_IRQ_IDE;
+        ide_register_hw(&hw);
+#endif
+    }
+    else if( machine_is_trizeps() ){
+#ifdef CONFIG_SA1100_TRIZEPS
+	hw_regs_t hw;
+
+	/* Enable appropriate GPIOs as interrupt lines */
+	GPDR &= ~GPIO_GPIO(TRIZEPS_IRQ_IDE);
+	set_irq_type( TRIZEPS_IRQ_IDE, IRQT_RISING );
+
+	/* set the pcmcia interface timing */
+	//MECR = 0x00060006; // Done on trizeps init
+
+	/* Take hard drives out of reset */
+	GPSR = GPIO_GPIO(TRIZEPS_IRQ_IDE);
+
+	ide_init_hwif_ports(&hw, TRIZEPS_IDE_CS0 + 0, TRIZEPS_IDE_CS1 + 6, NULL);
+	hw.irq = TRIZEPS_IRQ_IDE;
+	ide_register_hw(&hw, NULL);
 #endif
     }
 }
-
-

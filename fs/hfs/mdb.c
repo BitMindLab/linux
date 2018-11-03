@@ -2,7 +2,7 @@
  * linux/fs/hfs/mdb.c
  *
  * Copyright (C) 1995-1997  Paul H. Hargrove
- * This file may be distributed under the terms of the GNU Public License.
+ * This file may be distributed under the terms of the GNU General Public License.
  *
  * This file contains functions for reading/writing the MDB.
  *
@@ -100,8 +100,7 @@ struct hfs_mdb *hfs_mdb_get(hfs_sysmdb sys_mdb, int readonly,
 	mdb->magic = HFS_MDB_MAGIC;
 	mdb->sys_mdb = sys_mdb;
 	INIT_LIST_HEAD(&mdb->entry_dirty);
-	hfs_init_waitqueue(&mdb->rename_wait);
-	hfs_init_waitqueue(&mdb->bitmap_wait);
+	init_MUTEX(&mdb->bitmap_sem);
 
 	/* See if this is an HFS filesystem */
 	buf = hfs_buffer_get(sys_mdb, part_start + HFS_MDB_BLK, 1);

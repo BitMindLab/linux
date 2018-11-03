@@ -1,24 +1,12 @@
-/* $Id: hfc_pci.h,v 1.8 2000/06/26 08:59:13 keil Exp $
+/* $Id: hfc_pci.h,v 1.8.6.2 2001/09/23 22:24:48 kai Exp $
  *
- *  specific defines for CCD's HFC 2BDS0 PCI chips
+ * specific defines for CCD's HFC 2BDS0 PCI chips
  *
- * Author     Werner Cornelius (werner@isdn4linux.de)      
- *
- * Copyright 1999  by Werner Cornelius (werner@isdn4linux.de)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * Author       Werner Cornelius
+ * Copyright    by Werner Cornelius  <werner@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -178,6 +166,9 @@
 #define HFCPCI_FIFOEN_B1     0x03
 #define HFCPCI_FIFOEN_B2     0x0C
 #define HFCPCI_FIFOEN_DTX    0x10
+#define HFCPCI_FIFOEN_B1TX   0x01
+#define HFCPCI_FIFOEN_B1RX   0x02
+#define HFCPCI_FIFOEN_B2TX   0x04
 #define HFCPCI_FIFOEN_B2RX   0x08
 
 
@@ -194,51 +185,53 @@
 typedef struct {
     unsigned short z1;  /* Z1 pointer 16 Bit */
     unsigned short z2;  /* Z2 pointer 16 Bit */
-  } z_type;
+  } __attribute__((packed)) z_type;
 
 typedef struct {
-    u_char data[D_FIFO_SIZE]; /* FIFO data space */
-    u_char fill1[0x20A0-D_FIFO_SIZE]; /* reserved, do not use */
-    u_char f1,f2; /* f pointers */
-    u_char fill2[0x20C0-0x20A2]; /* reserved, do not use */
+    u8 data[D_FIFO_SIZE]; /* FIFO data space */
+    u8 fill1[0x20A0-D_FIFO_SIZE]; /* reserved, do not use */
+    u8 f1,f2; /* f pointers */
+    u8 fill2[0x20C0-0x20A2]; /* reserved, do not use */
     z_type za[MAX_D_FRAMES+1]; /* mask index with D_FREG_MASK for access */
-    u_char fill3[0x4000-0x2100]; /* align 16K */  
-  } dfifo_type;
+    u8 fill3[0x4000-0x2100]; /* align 16K */  
+  } __attribute__((packed)) dfifo_type;
 
 typedef struct {
     z_type za[MAX_B_FRAMES+1]; /* only range 0x0..0x1F allowed */ 
-    u_char f1,f2; /* f pointers */
-    u_char fill[0x2100-0x2082]; /* alignment */
-  } bzfifo_type;
+    u8 f1,f2; /* f pointers */
+    u8 fill[0x2100-0x2082]; /* alignment */
+  } __attribute__((packed)) bzfifo_type;
 
 
 typedef union {
     struct { 
       dfifo_type d_tx; /* D-send channel */
       dfifo_type d_rx; /* D-receive channel */
-    } d_chan; 
+    } __attribute__((packed)) d_chan; 
     struct {
-      u_char fill1[0x200];
-      u_char txdat_b1[B_FIFO_SIZE];
+      u8 fill1[0x200];
+      u8 txdat_b1[B_FIFO_SIZE];
       bzfifo_type txbz_b1;
 
       bzfifo_type txbz_b2;
-      u_char txdat_b2[B_FIFO_SIZE];
+      u8 txdat_b2[B_FIFO_SIZE];
 
-      u_char fill2[D_FIFO_SIZE];
+      u8 fill2[D_FIFO_SIZE];
 
-      u_char rxdat_b1[B_FIFO_SIZE];
+      u8 rxdat_b1[B_FIFO_SIZE];
       bzfifo_type rxbz_b1;
 
       bzfifo_type rxbz_b2;
-      u_char rxdat_b2[B_FIFO_SIZE];
-    } b_chans;  
-    u_char fill[32768]; 
-  } fifo_area;
+      u8 rxdat_b2[B_FIFO_SIZE];
+    } __attribute__((packed)) b_chans;  
+    u8 fill[32768]; 
+  } __attribute__((packed)) fifo_area;
 
 
-#define Write_hfc(a,b,c) (*(((u_char *)a->hw.hfcpci.pci_io)+b) = c) 
-#define Read_hfc(a,b) (*(((u_char *)a->hw.hfcpci.pci_io)+b))
+//#define Write_hfc(a,b,c) (*(((u8 *)a->hw.hfcpci.pci_io)+b) = c) 
+//#define Read_hfc(a,b) (*(((u8 *)a->hw.hfcpci.pci_io)+b))
+#define Write_hfc(a,b,c)	writeb(c, ((u8 *)a->hw.hfcpci.pci_io)+b)
+#define Read_hfc(a,b)		readb(((u8 *)a->hw.hfcpci.pci_io)+b)
 
 extern void main_irq_hcpci(struct BCState *bcs);
 extern void inithfcpci(struct IsdnCardState *cs);

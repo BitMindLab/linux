@@ -5,13 +5,15 @@
 	Copyright 1994 by Donald Becker.
 	Copyright 1993 United States Government as represented by the
 	Director, National Security Agency.  This software may be used and
-	distributed according to the terms of the GNU Public License,
+	distributed according to the terms of the GNU General Public License,
 	incorporated herein by reference.
 
 	This is a driver for the Cabletron E2100 series ethercards.
 
-	The Author may be reached as becker@cesdis.gsfc.nasa.gov, or
-	C/O Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The Author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
 
 	The E2100 series ethercard is a fairly generic shared memory 8390
 	implementation.  The only unusual aspect is the way the shared memory
@@ -31,13 +33,11 @@
 	If this happens, you must power down the machine for about 30 seconds.
 */
 
-static const char *version =
+static const char version[] =
 	"e2100.c:v1.01 7/21/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
@@ -70,7 +70,7 @@ static int e21_probe_list[] = {0x300, 0x280, 0x380, 0x220, 0};
 #define E21_SAPROM		0x10	/* Offset to station address data. */
 #define E21_IO_EXTENT	 0x20
 
-extern inline void mem_on(short port, volatile char *mem_base,
+static inline void mem_on(short port, volatile char *mem_base,
 						  unsigned char start_page )
 {
 	/* This is a little weird: set the shared memory window by doing a
@@ -80,7 +80,7 @@ extern inline void mem_on(short port, volatile char *mem_base,
 	outb(E21_MEM_ON, port + E21_MEM_ENABLE + E21_MEM_ON);
 }
 
-extern inline void mem_off(short port)
+static inline void mem_off(short port)
 {
 	inb(port + E21_MEM_ENABLE);
 	outb(0x00, port + E21_MEM_ENABLE);
@@ -140,7 +140,7 @@ static int __init e21_probe1(struct net_device *dev, int ioaddr)
 {
 	int i, status, retval;
 	unsigned char *station_addr = dev->dev_addr;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 
 	if (!request_region(ioaddr, E21_IO_EXTENT, dev->name))
 		return -EBUSY;
@@ -232,8 +232,8 @@ static int __init e21_probe1(struct net_device *dev, int ioaddr)
 #ifdef notdef
 	/* These values are unused.  The E2100 has a 2K window into the packet
 	   buffer.  The window can be set to start on any page boundary. */
-	dev->rmem_start = dev->mem_start + TX_PAGES*256;
-	dev->mem_end = dev->rmem_end = dev->mem_start + 2*1024;
+	ei_status.rmem_start = dev->mem_start + TX_PAGES*256;
+	dev->mem_end = ei_status.rmem_end = dev->mem_start + 2*1024;
 #endif
 
 	printk(", IRQ %d, %s media, memory @ %#lx.\n", dev->irq,
@@ -386,6 +386,12 @@ MODULE_PARM(io, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
 MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
 MODULE_PARM(xcvr, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
+MODULE_PARM_DESC(io, "I/O base address(es)");
+MODULE_PARM_DESC(irq, "IRQ number(s)");
+MODULE_PARM_DESC(mem, " memory base address(es)");
+MODULE_PARM_DESC(xcvr, "transceiver(s) (0=internal, 1=external)");
+MODULE_DESCRIPTION("Cabletron E2100 ISA ethernet driver");
+MODULE_LICENSE("GPL");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
@@ -434,12 +440,3 @@ cleanup_module(void)
 	}
 }
 #endif /* MODULE */
-
-/*
- * Local variables:
- *  compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/net/inet -Wall -Wstrict-prototypes -O6 -m486 -c e2100.c"
- *  version-control: t
- *  tab-width: 4
- *  kept-new-versions: 5
- * End:
- */

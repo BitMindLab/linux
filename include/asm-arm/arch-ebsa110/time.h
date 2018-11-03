@@ -17,62 +17,102 @@
  */
 
 #include <asm/leds.h>
+#include <asm/io.h>
 
-#define MCLK_47_8
+extern unsigned long (*gettimeoffset)(void);
 
-#if defined(MCLK_42_3)
-#define PIT1_COUNT 0xecbe
-#elif defined(MCLK_47_8)
+#define PIT_CTRL		(PIT_BASE + 0x0d)
+#define PIT_T2			(PIT_BASE + 0x09)
+#define PIT_T1			(PIT_BASE + 0x05)
+#define PIT_T0			(PIT_BASE + 0x01)
+
 /*
- * This should be 0x10B43, but that doesn't exactly fit.
- * We run the timer interrupt at 5ms, and then divide it by
- * two in software...  This is so that the user processes
- * see exactly the same model whichever ARM processor they're
- * running on.
+ * This is the rate at which your MCLK signal toggles (in Hz)
+ * This was measured on a 10 digit frequency counter sampling
+ * over 1 second.
  */
-#define PIT1_COUNT 0x85A1
-#define DIVISOR 2
-#endif
+#define MCLK	47894000
 
-static void timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+/*
+ * This is the rate at which the PIT timers get clocked
+ */
+#define CLKBY7	(MCLK / 7)
+
+/*
+ * This is the counter value.  We tick at 200Hz on this platform.
+ */
+#define COUNT	((CLKBY7 + (HZ / 2)) / HZ)
+
+/*
+ * Get the time offset from the system PIT.  Note that if we have missed an
+ * interrupt, then the PIT counter will roll over (ie, be negative).
+ * This actually works out to be convenient.
+ */
+static unsigned long ebsa110_gettimeoffset(void)
 {
-	*PIT_T1 = (PIT1_COUNT) & 0xff;
-	*PIT_T1 = (PIT1_COUNT) >> 8;
+	unsigned long offset, count;
 
-#ifdef DIVISOR
-	{
-		static unsigned int divisor;
+	__raw_writeb(0x40, PIT_CTRL);
+	count = __raw_readb(PIT_T1);
+	count |= __raw_readb(PIT_T1) << 8;
 
-		if (divisor--)
-			return;
-		divisor = DIVISOR - 1;
-	}
-#endif
+	/*
+	 * If count > COUNT, make the number negative.
+	 */
+	if (count > COUNT)
+		count |= 0xffff0000;
+
+	offset = COUNT;
+	offset -= count;
+
+	/*
+	 * `offset' is in units of timer counts.  Convert
+	 * offset to units of microseconds.
+	 */
+	offset = offset * (1000000 / HZ) / COUNT;
+
+	return offset;
+}
+
+static irqreturn_t
+timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+{
+	u32 count;
+
+	/* latch and read timer 1 */
+	__raw_writeb(0x40, PIT_CTRL);
+	count = __raw_readb(PIT_T1);
+	count |= __raw_readb(PIT_T1) << 8;
+
+	count += COUNT;
+
+	__raw_writeb(count & 0xff, PIT_T1);
+	__raw_writeb(count >> 8, PIT_T1);
+
 	do_leds();
 	do_timer(regs);
 	do_profile(regs);
+
+	return IRQ_HANDLED;
 }
 
 /*
  * Set up timer interrupt.
  */
-extern __inline__ void setup_timer(void)
+void __init time_init(void)
 {
 	/*
-	 * Timer 1, mode 0, 16-bit, autoreload
+	 * Timer 1, mode 2, LSB/MSB
 	 */
-	*PIT_CTRL = 0x70;
+	__raw_writeb(0x70, PIT_CTRL);
+	__raw_writeb(COUNT & 0xff, PIT_T1);
+	__raw_writeb(COUNT >> 8, PIT_T1);
 
-	/*
-	 * Refresh counter clocked at 47.8MHz/7 = 146.4ns
-	 * We want centi-second interrupts
-	 */
-	*PIT_T1 = (PIT1_COUNT) & 0xff;
-	*PIT_T1 = (PIT1_COUNT) >> 8;
+	gettimeoffset = ebsa110_gettimeoffset;
 
 	timer_irq.handler = timer_interrupt;
 
-	setup_arm_irq(IRQ_EBSA110_TIMER0, &timer_irq);
+	setup_irq(IRQ_EBSA110_TIMER0, &timer_irq);
 }
 
 

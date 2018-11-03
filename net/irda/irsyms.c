@@ -10,6 +10,7 @@
  * Modified by:   Dag Brattli <dagb@cs.uit.no>
  * 
  *     Copyright (c) 1997, 1999-2000 Dag Brattli, All Rights Reserved.
+ *     Copyright (c) 2000-2001 Jean Tourrilhes <jt@hpl.hp.com>
  *      
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -29,15 +30,10 @@
 #include <linux/poll.h>
 #include <linux/proc_fs.h>
 #include <linux/smp_lock.h>
-
-#include <asm/segment.h>
+#include <linux/if_arp.h>		/* ARPHRD_IRDA */
 
 #include <net/irda/irda.h>
-#include <net/irda/irmod.h>
 #include <net/irda/irlap.h>
-#ifdef CONFIG_IRDA_COMPRESSION
-#include <net/irda/irlap_comp.h>
-#endif /* CONFIG_IRDA_COMPRESSION */
 #include <net/irda/irlmp.h>
 #include <net/irda/iriap.h>
 #include <net/irda/irias_object.h>
@@ -46,6 +42,7 @@
 #include <net/irda/wrapper.h>
 #include <net/irda/timer.h>
 #include <net/irda/parameters.h>
+#include <net/irda/crc.h>
 
 extern struct proc_dir_entry *proc_irda;
 
@@ -66,11 +63,10 @@ extern int ircomm_tty_init(void);
 extern int irlpt_client_init(void);
 extern int irlpt_server_init(void);
 
-#ifdef CONFIG_IRDA_COMPRESSION
-#ifdef CONFIG_IRDA_DEFLATE
-extern irda_deflate_init();
-#endif /* CONFIG_IRDA_DEFLATE */
-#endif /* CONFIG_IRDA_COMPRESSION */
+extern int  irsock_init(void);
+extern void irsock_cleanup(void);
+extern int  irlap_driver_rcv(struct sk_buff *, struct net_device *, 
+			     struct packet_type *);
 
 /* IrTTP */
 EXPORT_SYMBOL(irttp_open_tsap);
@@ -88,7 +84,6 @@ EXPORT_SYMBOL(irttp_dup);
 EXPORT_SYMBOL(irda_debug);
 #endif
 EXPORT_SYMBOL(irda_notify_init);
-EXPORT_SYMBOL(irda_lock);
 #ifdef CONFIG_PROC_FS
 EXPORT_SYMBOL(proc_irda);
 #endif
@@ -138,25 +133,24 @@ EXPORT_SYMBOL(irlmp_dup);
 EXPORT_SYMBOL(lmp_reasons);
 
 /* Queue */
-EXPORT_SYMBOL(hashbin_find);
 EXPORT_SYMBOL(hashbin_new);
 EXPORT_SYMBOL(hashbin_insert);
 EXPORT_SYMBOL(hashbin_delete);
 EXPORT_SYMBOL(hashbin_remove);
 EXPORT_SYMBOL(hashbin_remove_this);
+EXPORT_SYMBOL(hashbin_find);
+EXPORT_SYMBOL(hashbin_lock_find);
+EXPORT_SYMBOL(hashbin_find_next);
 EXPORT_SYMBOL(hashbin_get_next);
 EXPORT_SYMBOL(hashbin_get_first);
 
 /* IrLAP */
 EXPORT_SYMBOL(irlap_open);
 EXPORT_SYMBOL(irlap_close);
-#ifdef CONFIG_IRDA_COMPRESSION
-EXPORT_SYMBOL(irda_unregister_compressor);
-EXPORT_SYMBOL(irda_register_compressor);
-#endif /* CONFIG_IRDA_COMPRESSION */
 EXPORT_SYMBOL(irda_init_max_qos_capabilies);
 EXPORT_SYMBOL(irda_qos_bits_to_value);
 EXPORT_SYMBOL(irda_device_setup);
+EXPORT_SYMBOL(alloc_irdadev);
 EXPORT_SYMBOL(irda_device_set_media_busy);
 EXPORT_SYMBOL(irda_device_txqueue_empty);
 
@@ -171,8 +165,12 @@ EXPORT_SYMBOL(irda_task_delete);
 
 EXPORT_SYMBOL(async_wrap_skb);
 EXPORT_SYMBOL(async_unwrap_char);
+EXPORT_SYMBOL(irda_calc_crc16);
+EXPORT_SYMBOL(irda_crc16_table);
 EXPORT_SYMBOL(irda_start_timer);
+#ifdef CONFIG_ISA
 EXPORT_SYMBOL(setup_dma);
+#endif
 EXPORT_SYMBOL(infrared_mode);
 
 #ifdef CONFIG_IRTTY
@@ -182,77 +180,56 @@ EXPORT_SYMBOL(irtty_unregister_dongle);
 EXPORT_SYMBOL(irtty_set_packet_mode);
 #endif
 
-int __init irda_init(void)
-{
-	IRDA_DEBUG(0, __FUNCTION__ "()\n");
-
- 	irlmp_init();
-	irlap_init();
-	
-	iriap_init();
- 	irttp_init();
-	
-#ifdef CONFIG_PROC_FS
-	irda_proc_register();
-#endif
-#ifdef CONFIG_SYSCTL
-	irda_sysctl_register();
-#endif
-	/* 
-	 * Initialize modules that got compiled into the kernel 
-	 */
-#ifdef CONFIG_IRLAN
-	irlan_init();
-#endif
-#ifdef CONFIG_IRCOMM
-	ircomm_init();
-	ircomm_tty_init();
+#ifdef CONFIG_IRDA_DEBUG
+__u32 irda_debug = IRDA_DEBUG_LEVEL;
 #endif
 
-#ifdef CONFIG_IRDA_COMPRESSION
-#ifdef CONFIG_IRDA_DEFLATE
-	irda_deflate_init();
-#endif /* CONFIG_IRDA_DEFLATE */
-#endif /* CONFIG_IRDA_COMPRESSION */
-
-	return 0;
-}
-
-static void __exit irda_cleanup(void)
-{
-#ifdef CONFIG_SYSCTL
-	irda_sysctl_unregister();
-#endif	
-
-#ifdef CONFIG_PROC_FS
-	irda_proc_unregister();
-#endif
-	/* Remove higher layers */
-	irttp_cleanup();
-	iriap_cleanup();
-
-	/* Remove lower layers */
-	irda_device_cleanup();
-	irlap_cleanup(); /* Must be done before irlmp_cleanup()! DB */
-
-	/* Remove middle layer */
-	irlmp_cleanup();
-}
+/* Packet type handler.
+ * Tell the kernel how IrDA packets should be handled.
+ */
+static struct packet_type irda_packet_type = {
+	.type	= __constant_htons(ETH_P_IRDA),
+	.func	= irlap_driver_rcv,	/* Packet type handler irlap_frame.c */
+};
 
 /*
- * Function irda_unlock (lock)
+ * Function irda_device_event (this, event, ptr)
  *
- *    Unlock variable. Returns false if lock is already unlocked
+ *    Called when a device is taken up or down
  *
  */
-inline int irda_unlock(int *lock) 
+static int irda_device_event(struct notifier_block *this, unsigned long event,
+			     void *ptr)
 {
-	if (!test_and_clear_bit(0, (void *) lock))  {
-		printk("Trying to unlock already unlocked variable!\n");
-		return FALSE;
+	struct net_device *dev = (struct net_device *) ptr;
+	
+        /* Reject non IrDA devices */
+	if (dev->type != ARPHRD_IRDA) 
+		return NOTIFY_DONE;
+	
+        switch (event) {
+	case NETDEV_UP:
+		IRDA_DEBUG(3, "%s(), NETDEV_UP\n", __FUNCTION__);
+		/* irda_dev_device_up(dev); */
+		break;
+	case NETDEV_DOWN:
+		IRDA_DEBUG(3, "%s(), NETDEV_DOWN\n", __FUNCTION__);
+		/* irda_kill_by_device(dev); */
+		/* irda_rt_device_down(dev); */
+		/* irda_dev_device_down(dev); */
+		break;
+	default:
+		break;
         }
-	return TRUE;
+
+        return NOTIFY_DONE;
 }
+
+static struct notifier_block irda_dev_notifier = {
+	irda_device_event,
+	NULL,
+	0
+};
 
 /*
  * Function irda_notify_init (notify)
@@ -270,6 +247,104 @@ void irda_notify_init(notify_t *notify)
 	notify->flow_indication = NULL;
 	notify->status_indication = NULL;
 	notify->instance = NULL;
-	strncpy(notify->name, "Unknown", NOTIFY_MAX_NAME);
+	strlcpy(notify->name, "Unknown", sizeof(notify->name));
 }
 
+/*
+ * Function irda_init (void)
+ *
+ *  Protocol stack initialisation entry point.
+ *  Initialise the various components of the IrDA stack
+ */
+int __init irda_init(void)
+{
+	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+
+	/* Lower layer of the stack */
+ 	irlmp_init();
+	irlap_init();
+	
+	/* Higher layers of the stack */
+	iriap_init();
+ 	irttp_init();
+	irsock_init();
+	
+	/* Add IrDA packet type (Start receiving packets) */
+        dev_add_pack(&irda_packet_type);
+
+	/* Notifier for Interface changes */
+	register_netdevice_notifier(&irda_dev_notifier);
+
+	/* External APIs */
+#ifdef CONFIG_PROC_FS
+	irda_proc_register();
+#endif
+#ifdef CONFIG_SYSCTL
+	irda_sysctl_register();
+#endif
+
+	/* Driver/dongle support */
+ 	irda_device_init();
+
+	return 0;
+}
+
+/*
+ * Function irda_cleanup (void)
+ *
+ *  Protocol stack cleanup/removal entry point.
+ *  Cleanup the various components of the IrDA stack
+ */
+void __exit irda_cleanup(void)
+{
+	/* Remove External APIs */
+#ifdef CONFIG_SYSCTL
+	irda_sysctl_unregister();
+#endif	
+#ifdef CONFIG_PROC_FS
+	irda_proc_unregister();
+#endif
+
+	/* Remove IrDA packet type (stop receiving packets) */
+        dev_remove_pack(&irda_packet_type);
+	
+	/* Stop receiving interfaces notifications */
+        unregister_netdevice_notifier(&irda_dev_notifier);
+	
+	/* Remove higher layers */
+	irsock_cleanup();
+	irttp_cleanup();
+	iriap_cleanup();
+
+	/* Remove lower layers */
+	irda_device_cleanup();
+	irlap_cleanup(); /* Must be done before irlmp_cleanup()! DB */
+
+	/* Remove middle layer */
+	irlmp_cleanup();
+}
+
+/*
+ * The IrDA stack must be initialised *before* drivers get initialised,
+ * and *before* higher protocols (IrLAN/IrCOMM/IrNET) get initialised,
+ * otherwise bad things will happen (hashbins will be NULL for example).
+ * Those modules are at module_init()/device_initcall() level.
+ *
+ * On the other hand, it needs to be initialised *after* the basic
+ * networking, the /proc/net filesystem and sysctl module. Those are
+ * currently initialised in .../init/main.c (before initcalls).
+ * Also, IrDA drivers needs to be initialised *after* the random number
+ * generator (main stack and higher layer init don't need it anymore).
+ *
+ * Jean II
+ */
+subsys_initcall(irda_init);
+module_exit(irda_cleanup);
+ 
+MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no> & Jean Tourrilhes <jt@hpl.hp.com>");
+MODULE_DESCRIPTION("The Linux IrDA Protocol Stack"); 
+MODULE_LICENSE("GPL");
+#ifdef CONFIG_IRDA_DEBUG
+MODULE_PARM(irda_debug, "1l");
+#endif
+MODULE_ALIAS_NETPROTO(PF_IRDA);

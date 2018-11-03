@@ -1,4 +1,4 @@
-/* $Id: ebus.c,v 1.15 2000/11/08 05:06:21 davem Exp $
+/* $Id: ebus.c,v 1.20 2002/01/05 01:13:43 davem Exp $
  * ebus.c: PCI to EBus bridge device.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -11,7 +11,7 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/init.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 
 #include <asm/system.h>
@@ -23,10 +23,6 @@
 #include <asm/bpp.h>
 
 struct linux_ebus *ebus_chain = 0;
-
-#ifdef CONFIG_SUN_AUXIO
-extern void auxio_probe(void);
-#endif
 
 /* We are together with pcic.c under CONFIG_PCI. */
 extern unsigned int pcic_pin_to_irq(unsigned int, char *name);
@@ -111,6 +107,9 @@ void __init fill_ebus_child(int node, struct linux_prom_registers *preg,
 		}
 		dev->resource[i].start = dev->parent->resource[regs[i]].start; /* XXX resource */
 	}
+
+	for (i = 0; i < PROMINTR_MAX; i++)
+		dev->irqs[i] = PCI_IRQ_NONE;
 
 	if ((dev->irqs[0] = ebus_blacklist_irq(dev->prom_name)) != 0) {
 		dev->num_irqs = 1;
@@ -204,6 +203,9 @@ void __init fill_ebus_device(int node, struct linux_ebus_device *dev)
 		dev->resource[i].start = baseaddr;	/* XXX Unaligned */
 	}
 
+	for (i = 0; i < PROMINTR_MAX; i++)
+		dev->irqs[i] = PCI_IRQ_NONE;
+
 	if ((dev->irqs[0] = ebus_blacklist_irq(dev->prom_name)) != 0) {
 		dev->num_irqs = 1;
 	} else if ((len = prom_getproperty(node, "interrupts",
@@ -264,9 +266,6 @@ void __init ebus_init(void)
 	int nd, len, ebusnd;
 	int reg, nreg;
 	int num_ebus = 0;
-
-	if (!pci_present())
-		return;
 
 	prom_getstring(prom_root_node, "name", lbuf, sizeof(lbuf));
 	for (sp = ebus_blacklist; sp->esname != NULL; sp++) {
@@ -357,8 +356,4 @@ void __init ebus_init(void)
 		ebus->next = 0;
 		++num_ebus;
 	}
-
-#ifdef CONFIG_SUN_AUXIO
-	auxio_probe();
-#endif
 }

@@ -43,29 +43,19 @@ asmlinkage unsigned int csum_partial_copy_generic( const char *src, char *dst, i
  *	If you use these functions directly please don't forget the 
  *	verify_area().
  */
-extern __inline__
+static __inline__
 unsigned int csum_partial_copy_nocheck ( const char *src, char *dst,
 					int len, int sum)
 {
 	return csum_partial_copy_generic ( src, dst, len, sum, NULL, NULL);
 }
 
-extern __inline__
+static __inline__
 unsigned int csum_partial_copy_from_user ( const char *src, char *dst,
 						int len, int sum, int *err_ptr)
 {
 	return csum_partial_copy_generic ( src, dst, len, sum, err_ptr, NULL);
 }
-
-/*
- * These are the old (and unsafe) way of doing checksums, a warning message will be
- * printed if they are used and an exeption occurs.
- *
- * these functions should go away after some time.
- */
-
-#define csum_partial_copy_fromuser csum_partial_copy
-unsigned int csum_partial_copy( const char *src, char *dst, int len, int sum);
 
 /*
  *	Fold a partial checksum

@@ -629,7 +629,7 @@ typedef struct _SCCB {
 #if (FW_TYPE==_UCB_MGR_)  
    #define  HBA_AUTO_SENSE_FAIL        0x1B  
    #define  HBA_TQ_REJECTED            0x1C  
-   #define  HBA_UNSUPORTED_MSG         0x1D  
+   #define  HBA_UNSUPPORTED_MSG         0x1D  
    #define  HBA_HW_ERROR               0x20  
    #define  HBA_ATN_NOT_RESPONDED      0x21  
    #define  HBA_SCSI_RESET_BY_ADAPTER  0x22
@@ -3846,7 +3846,7 @@ int SetDevWideMode(PSCCBcard pCurrCard,PUCB p_ucb)
 	}
 	else
 	{
-		if(!currTar_Info->TarEEValue & EE_WIDE_SCSI)
+		if(!(currTar_Info->TarEEValue & EE_WIDE_SCSI))
 		{
 			return(0);
 		}
@@ -7529,7 +7529,7 @@ void sinits(PSCCB p_sccb, UCHAR p_card)
  *
  *   $Workfile:   phase.c  $
  *
- *   Description:  Functions to intially handle the SCSI bus phase when
+ *   Description:  Functions to initially handle the SCSI bus phase when
  *                 the target asserts request (and the automation is not
  *                 enabled to handle the situation).
  *
@@ -10866,7 +10866,7 @@ int DiagBusMaster(ULONG port)
  * Function: DiagEEPROM
  *
  * Description: Verfiy checksum and 'Key' and initialize the EEPROM if
- *              neccessary.
+ *              necessary.
  *
  *---------------------------------------------------------------------*/
 

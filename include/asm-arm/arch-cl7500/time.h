@@ -9,30 +9,35 @@
  *  04-Dec-1997	RMK	Updated for new arch/arm/time.c
  */
 
-static void timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+extern void ioctime_init(void);
+
+static irqreturn_t
+timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	do_timer(regs);
 	do_set_rtc();
+	do_profile(regs);
 
 	{
 		/* Twinkle the lights. */
-		static int count, state = 0xff;
+		static int count, state = 0xff00;
 		if (count-- == 0) {
-			state ^= 1;
+			state ^= 0x100;
 			count = 25;
-			*((volatile unsigned int *)(0xe002ba00)) = state;
+			*((volatile unsigned int *)LED_ADDRESS) = state;
 		}
 	}
-
-	do_profile(regs);
+	return IRQ_HANDLED;
 }
 
 /*
  * Set up timer interrupt.
  */
-extern __inline__ void setup_timer(void)
+void __init time_init(void)
 {
+	ioctime_init();
+
 	timer_irq.handler = timer_interrupt;
 
-	setup_arm_irq(IRQ_TIMER, &timer_irq);
+	setup_irq(IRQ_TIMER, &timer_irq);
 }

@@ -843,7 +843,7 @@ isp_acc_exit2:
 	bra.l		_real_access		
 
 # if the addressing mode was (an)+ or -(an), the address register must
-# be restored to it's pre-exception value before entering _real_access.
+# be restored to its pre-exception value before entering _real_access.
 isp_restore:
 	cmpi.b		SPCOND_FLG(%a6),&restore_flg # do we need a restore?
 	bne.b		isp_restore_done	# no
@@ -2516,7 +2516,7 @@ _mul64:
 	cmpi.b		%d0, &0x7		# is src mode Dn or other?
 	bgt.w		mul64_memop		# src is in memory
 
-# multiplier operand in the the data register file.
+# multiplier operand in the data register file.
 # must extract the register number and fetch the operand from the stack.
 mul64_regop:
 	andi.w		&0x7, %d0		# extract Dn
@@ -2625,7 +2625,7 @@ mul64_neg:
 	addx.l		%d7, %d4		# add carry to hi(result)
 
 # the result is saved to the register file.
-# for '040 compatability, if Dl == Dh then only the hi(result) is
+# for '040 compatibility, if Dl == Dh then only the hi(result) is
 # saved. so, saving hi after lo accomplishes this without need to
 # check Dl,Dh equality.
 mul64_done:
@@ -3835,7 +3835,7 @@ CAS2W2_FILLER:
 #	    assert LOCKE* for the final write operation.		#
 #	(13)Exit.							#
 # 									#
-# 	The algorithm is actually implemented slightly diferently	#
+# 	The algorithm is actually implemented slightly differently	#
 # depending on the size of the operation and the misalignment of the	#
 # operand. A misaligned operand must be written in aligned chunks or	#
 # else the BUSCR register control gets confused.			#

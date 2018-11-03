@@ -1,19 +1,17 @@
-/* $Id: ptrace.h,v 1.7 1999/09/28 22:27:17 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1994, 1995, 1996, 1997, 1998 by Ralf Baechle
- *
- * Machine dependent structs and defines to help the user use
- * the ptrace system call.
+ * Copyright (C) 1994, 95, 96, 97, 98, 99, 2000 by Ralf Baechle
+ * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
  */
-#ifndef __ASM_MIPS_PTRACE_H
-#define __ASM_MIPS_PTRACE_H
+#ifndef _ASM_PTRACE_H
+#define _ASM_PTRACE_H
+
+#include <linux/config.h>
 
 #include <asm/isadep.h>
-#include <linux/types.h>
 
 /* 0 - 31 are integer registers, 32 - 63 are fp registers.  */
 #define FPR_BASE	32
@@ -25,14 +23,17 @@
 #define FPC_CSR		69
 #define FPC_EIR		70
 
-#ifndef _LANGUAGE_ASSEMBLY
+#ifndef __ASSEMBLY__
+
 /*
  * This struct defines the way the registers are stored on the stack during a
  * system call/exception. As usual the registers k0/k1 aren't being saved.
  */
 struct pt_regs {
+#ifdef CONFIG_MIPS32
 	/* Pad bytes for argument save space on the stack. */
 	unsigned long pad0[6];
+#endif
 
 	/* Saved main processor registers. */
 	unsigned long regs[32];
@@ -50,15 +51,28 @@ struct pt_regs {
 	unsigned long cp0_cause;
 };
 
-#endif /* !(_LANGUAGE_ASSEMBLY) */
+#endif /* !__ASSEMBLY__ */
 
-#ifdef _LANGUAGE_ASSEMBLY
+/* Arbitrarily choose the same ptrace numbers as used by the Sparc code. */
+/* #define PTRACE_GETREGS		12 */
+/* #define PTRACE_SETREGS		13 */
+/* #define PTRACE_GETFPREGS		14 */
+/* #define PTRACE_SETFPREGS		15 */
+/* #define PTRACE_GETFPXREGS		18 */
+/* #define PTRACE_SETFPXREGS		19 */
+
+#define PTRACE_OLDSETOPTIONS	21
+
+#define PTRACE_GET_THREAD_AREA	25
+#define PTRACE_SET_THREAD_AREA	26
+
+#ifdef __ASSEMBLY__
 #include <asm/offset.h>
 #endif
 
 #ifdef __KERNEL__
 
-#ifndef _LANGUAGE_ASSEMBLY
+#ifndef __ASSEMBLY__
 /*
  * Does the process account for user or for system time?
  */
@@ -67,8 +81,8 @@ struct pt_regs {
 #define instruction_pointer(regs) ((regs)->cp0_epc)
 
 extern void show_regs(struct pt_regs *);
-#endif /* !(_LANGUAGE_ASSEMBLY) */
+#endif /* !__ASSEMBLY__ */
 
 #endif
 
-#endif /* __ASM_MIPS_PTRACE_H */
+#endif /* _ASM_PTRACE_H */

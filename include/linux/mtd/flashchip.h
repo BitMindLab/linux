@@ -6,7 +6,7 @@
  *
  * (C) 2000 Red Hat. GPLd.
  *
- * $Id: flashchip.h,v 1.4 2000/07/03 12:58:41 dwmw2 Exp $
+ * $Id: flashchip.h,v 1.9 2003/04/30 11:15:22 dwmw2 Exp $
  *
  */
 
@@ -25,12 +25,18 @@ typedef enum {
 	FL_CFI_QUERY,
 	FL_JEDEC_QUERY,
 	FL_ERASING,
+	FL_ERASE_SUSPENDING,
 	FL_ERASE_SUSPENDED,
 	FL_WRITING,
+	FL_WRITING_TO_BUFFER,
+	FL_WRITE_SUSPENDING,
 	FL_WRITE_SUSPENDED,
 	FL_PM_SUSPENDED,
 	FL_SYNCING,
 	FL_UNLOADING,
+	FL_LOCKING,
+	FL_UNLOCKING,
+	FL_POINT,
 	FL_UNKNOWN
 } flstate_t;
 
@@ -49,8 +55,13 @@ struct flchip {
 	   a given offset, and we'll want to add the per-chip length field
 	   back in.
 	*/
+	int ref_point_counter;
 	flstate_t state;
 	flstate_t oldstate;
+
+	int write_suspended:1;
+	int erase_suspended:1;
+
 	spinlock_t *mutex;
 	spinlock_t _spinlock; /* We do it like this because sometimes they'll be shared. */
 	wait_queue_head_t wq; /* Wait on here when we're waiting for the chip

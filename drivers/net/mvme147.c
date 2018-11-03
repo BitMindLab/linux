@@ -7,30 +7,25 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/errno.h>
-#include <asm/system.h>
-#include <asm/io.h>
-#include <asm/pgtable.h>
-
 /* Used for the temporal inet entries and routing */
 #include <linux/socket.h>
 #include <linux/route.h>
-
 #include <linux/dio.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 
+#include <asm/system.h>
+#include <asm/io.h>
+#include <asm/pgtable.h>
 #include <asm/mvme147hw.h>
 
 /* We have 16834 bytes of RAM for the init block and buffers. This places
@@ -66,13 +61,13 @@ typedef void (*writerdp_t)(void *, unsigned short);
 typedef unsigned short (*readrdp_t)(void *);
 
 #ifdef MODULE
-static struct m147lance_private *root_m147lance_dev = NULL;
+static struct m147lance_private *root_m147lance_dev;
 #endif
 
 /* Initialise the one and only on-board 7990 */
 int __init mvme147lance_probe(struct net_device *dev)
 {
-	static int called = 0;
+	static int called;
 	static const char name[] = "MVME147 LANCE";
 	struct m147lance_private *lp;
 	u_long *addr;
@@ -188,6 +183,8 @@ static int m147lance_close(struct net_device *dev)
 }
 
 #ifdef MODULE
+MODULE_LICENSE("GPL");
+
 int init_module(void)
 {
 	root_lance_dev = NULL;
@@ -202,7 +199,7 @@ void cleanup_module(void)
 		lp = root_m147lance_dev->next_module;
 		unregister_netdev(root_lance_dev->dev);
 		free_pages(lp->ram, 3);
-		kfree(root_lance_dev->dev);
+		free_netdev(root_lance_dev->dev);
 		root_lance_dev = lp;
 	}
 }

@@ -1,10 +1,12 @@
-/* $Id: w6692.h,v 1.2 2000/06/26 08:59:15 keil Exp $
+/* $Id: w6692.h,v 1.2.6.2 2001/09/23 22:24:52 kai Exp $
  *
- * w6692.h   Winbond W6692 specific defines
+ * Winbond W6692 specific defines
  *
- * Author       Petr Novak <petr.novak@i.cz>
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Author       Petr Novak
+ * Copyright    by Petr Novak        <petr.novak@i.cz>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -15,9 +17,6 @@
 #define	writeW6692fifo	writeisacfifo
 
 /* B-channel FIFO read/write routines */
-
-#define READW6692BFIFO(cs,bchan,ptr,count) \
-	insb(cs->hw.w6692.iobase+W_B_RFIFO+(bchan?0x40:0),ptr,count)
 
 #define WRITEW6692BFIFO(cs,bchan,ptr,count) \
 	outsb(cs->hw.w6692.iobase+W_B_XFIFO+(bchan?0x40:0),ptr,count)

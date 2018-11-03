@@ -5,13 +5,15 @@
 struct pipe_inode_info {
 	wait_queue_head_t wait;
 	char *base;
+	unsigned int len;
 	unsigned int start;
 	unsigned int readers;
 	unsigned int writers;
-	unsigned int waiting_readers;
 	unsigned int waiting_writers;
 	unsigned int r_counter;
 	unsigned int w_counter;
+	struct fasync_struct *fasync_readers;
+	struct fasync_struct *fasync_writers;
 };
 
 /* Differs from PIPE_BUF in that PIPE_SIZE is the length of the actual
@@ -22,13 +24,14 @@ struct pipe_inode_info {
 #define PIPE_WAIT(inode)	(&(inode).i_pipe->wait)
 #define PIPE_BASE(inode)	((inode).i_pipe->base)
 #define PIPE_START(inode)	((inode).i_pipe->start)
-#define PIPE_LEN(inode)		((inode).i_size)
+#define PIPE_LEN(inode)		((inode).i_pipe->len)
 #define PIPE_READERS(inode)	((inode).i_pipe->readers)
 #define PIPE_WRITERS(inode)	((inode).i_pipe->writers)
-#define PIPE_WAITING_READERS(inode)	((inode).i_pipe->waiting_readers)
 #define PIPE_WAITING_WRITERS(inode)	((inode).i_pipe->waiting_writers)
 #define PIPE_RCOUNTER(inode)	((inode).i_pipe->r_counter)
 #define PIPE_WCOUNTER(inode)	((inode).i_pipe->w_counter)
+#define PIPE_FASYNC_READERS(inode)     (&((inode).i_pipe->fasync_readers))
+#define PIPE_FASYNC_WRITERS(inode)     (&((inode).i_pipe->fasync_writers))
 
 #define PIPE_EMPTY(inode)	(PIPE_LEN(inode) == 0)
 #define PIPE_FULL(inode)	(PIPE_LEN(inode) == PIPE_SIZE)

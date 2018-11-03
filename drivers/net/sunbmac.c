@@ -1,45 +1,44 @@
-/* $Id: sunbmac.c,v 1.21 2000/10/22 16:08:38 davem Exp $
+/* $Id: sunbmac.c,v 1.30 2002/01/15 06:48:55 davem Exp $
  * sunbmac.c: Driver for Sparc BigMAC 100baseT ethernet adapters.
  *
- * Copyright (C) 1997, 1998, 1999 David S. Miller (davem@redhat.com)
+ * Copyright (C) 1997, 1998, 1999, 2003 David S. Miller (davem@redhat.com)
  */
-
-static char *version =
-        "sunbmac.c:v1.9 11/Sep/99 David S. Miller (davem@redhat.com)\n";
 
 #include <linux/module.h>
 
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
+#include <linux/crc32.h>
 #include <linux/errno.h>
-#include <asm/byteorder.h>
-
-#include <asm/idprom.h>
-#include <asm/sbus.h>
-#include <asm/openprom.h>
-#include <asm/oplib.h>
-#include <asm/auxio.h>
-#include <asm/pgtable.h>
-
+#include <linux/ethtool.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 
+#include <asm/auxio.h>
+#include <asm/bitops.h>
+#include <asm/byteorder.h>
+#include <asm/dma.h>
+#include <asm/idprom.h>
+#include <asm/io.h>
+#include <asm/openprom.h>
+#include <asm/oplib.h>
+#include <asm/pgtable.h>
+#include <asm/sbus.h>
+#include <asm/system.h>
+
 #include "sunbmac.h"
+
+static char version[] __initdata =
+        "sunbmac.c:v2.0 24/Nov/03 David S. Miller (davem@redhat.com)\n";
 
 #undef DEBUG_PROBE
 #undef DEBUG_TX
@@ -63,7 +62,7 @@ static char *version =
 #define DIRQ(x)
 #endif
 
-static struct bigmac *root_bigmac_dev = NULL;
+static struct bigmac *root_bigmac_dev;
 
 #define DEFAULT_JAMSIZE    4 /* Toe jam */
 
@@ -864,6 +863,7 @@ static void bigmac_rx(struct bigmac *bp)
 		/* No checksums done by the BigMAC ;-( */
 		skb->protocol = eth_type_trans(skb, bp->dev);
 		netif_rx(skb);
+		bp->dev->last_rx = jiffies;
 		bp->enet_stats.rx_packets++;
 		bp->enet_stats.rx_bytes += len;
 	next:
@@ -875,7 +875,7 @@ static void bigmac_rx(struct bigmac *bp)
 		printk(KERN_NOTICE "%s: Memory squeeze, deferring packet.\n", bp->dev->name);
 }
 
-static void bigmac_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t bigmac_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct bigmac *bp = (struct bigmac *) dev_id;
 	u32 qec_status, bmac_status;
@@ -896,24 +896,25 @@ static void bigmac_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (bmac_status & CREG_STAT_RXIRQ)
 		bigmac_rx(bp);
+
+	return IRQ_HANDLED;
 }
 
 static int bigmac_open(struct net_device *dev)
 {
 	struct bigmac *bp = (struct bigmac *) dev->priv;
-	int res;
+	int ret;
 
-	if (request_irq(dev->irq, &bigmac_interrupt,
-			SA_SHIRQ, "BIG MAC", (void *) bp)) {
+	ret = request_irq(dev->irq, &bigmac_interrupt, SA_SHIRQ, dev->name, bp);
+	if (ret) {
 		printk(KERN_ERR "BIGMAC: Can't order irq %d to go.\n", dev->irq);
-		return -EAGAIN;
+		return ret;
 	}
 	init_timer(&bp->bigmac_timer);
-	res = bigmac_init(bp, 0);
-	if (!res) {
-		MOD_INC_USE_COUNT;
-	}
-	return res;
+	ret = bigmac_init(bp, 0);
+	if (ret)
+		free_irq(dev->irq, bp);
+	return ret;
 }
 
 static int bigmac_close(struct net_device *dev)
@@ -926,8 +927,7 @@ static int bigmac_close(struct net_device *dev)
 
 	bigmac_stop(bp);
 	bigmac_clean_rings(bp);
-	free_irq(dev->irq, (void *)bp);
-	MOD_DEC_USE_COUNT;
+	free_irq(dev->irq, bp);
 	return 0;
 }
 
@@ -980,17 +980,14 @@ static struct net_device_stats *bigmac_get_stats(struct net_device *dev)
 	return &bp->enet_stats;
 }
 
-#define CRC_POLYNOMIAL_BE 0x04c11db7UL  /* Ethernet CRC, big endian */
-#define CRC_POLYNOMIAL_LE 0xedb88320UL  /* Ethernet CRC, little endian */
-
 static void bigmac_set_multicast(struct net_device *dev)
 {
 	struct bigmac *bp = (struct bigmac *) dev->priv;
 	unsigned long bregs = bp->bregs;
 	struct dev_mc_list *dmi = dev->mc_list;
 	char *addrs;
-	int i, j, bit, byte;
-	u32 tmp, crc, poly = CRC_POLYNOMIAL_LE;
+	int i;
+	u32 tmp, crc;
 
 	/* Disable the receiver.  The bit self-clears when
 	 * the operation is complete.
@@ -1023,17 +1020,7 @@ static void bigmac_set_multicast(struct net_device *dev)
 			if (!(*addrs & 1))
 				continue;
 
-			crc = 0xffffffffU;
-			for (byte = 0; byte < 6; byte++) {
-				for (bit = *addrs++, j = 0; j < 8; j++, bit >>= 1) {
-					int test;
-
-					test = ((bit ^ crc) & 0x01);
-					crc >>= 1;
-					if (test)
-						crc = crc ^ poly;
-				}
-			}
+			crc = ether_crc_le(6, addrs);
 			crc >>= 26;
 			hash_table[crc >> 4] |= 1 << (crc & 0xf);
 		}
@@ -1049,36 +1036,60 @@ static void bigmac_set_multicast(struct net_device *dev)
 	sbus_writel(tmp, bregs + BMAC_RXCFG);
 }
 
-static int __init bigmac_ether_init(struct net_device *dev, struct sbus_dev *qec_sdev)
+/* Ethtool support... */
+static void bigmac_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info)
 {
-	static int version_printed = 0;
-	struct bigmac *bp = 0;
+	struct bigmac *bp = dev->priv;
+
+	strcpy(info->driver, "sunbmac");
+	strcpy(info->version, "2.0");
+	sprintf(info->bus_info, "SBUS:%d",
+		bp->qec_sdev->slot);
+}
+
+static u32 bigmac_get_link(struct net_device *dev)
+{
+	struct bigmac *bp = dev->priv;
+
+	spin_lock_irq(&bp->lock);
+	bp->sw_bmsr = bigmac_tcvr_read(bp, bp->tregs, BIGMAC_BMSR);
+	spin_unlock_irq(&bp->lock);
+
+	return (bp->sw_bmsr & BMSR_LSTATUS);
+}
+
+static struct ethtool_ops bigmac_ethtool_ops = {
+	.get_drvinfo		= bigmac_get_drvinfo,
+	.get_link		= bigmac_get_link,
+};
+
+static int __init bigmac_ether_init(struct sbus_dev *qec_sdev)
+{
+	struct net_device *dev;
+	static int version_printed;
+	struct bigmac *bp;
 	u8 bsizes, bsizes_more;
-	int i, res = ENOMEM;
+	int i;
 
 	/* Get a new device struct for this interface. */
-	dev = init_etherdev(0, sizeof(struct bigmac));
+	dev = alloc_etherdev(sizeof(struct bigmac));
+	if (!dev)
+		return -ENOMEM;
+	SET_MODULE_OWNER(dev);
 
 	if (version_printed++ == 0)
 		printk(KERN_INFO "%s", version);
 
-	/* Report what we have found to the user. */
-	printk(KERN_INFO "%s: BigMAC 100baseT Ethernet ", dev->name);
 	dev->base_addr = (long) qec_sdev;
 	for (i = 0; i < 6; i++)
-		printk("%2.2x%c", dev->dev_addr[i] = idprom->id_ethaddr[i],
-		       i == 5 ? ' ' : ':');
-	printk("\n");
+		dev->dev_addr[i] = idprom->id_ethaddr[i];
 
 	/* Setup softc, with backpointers to QEC and BigMAC SBUS device structs. */
-	bp = (struct bigmac *) dev->priv;
+	bp = dev->priv;
 	bp->qec_sdev = qec_sdev;
 	bp->bigmac_sdev = qec_sdev->child;
 
 	spin_lock_init(&bp->lock);
-
-	/* All further failures we find return this. */
-	res = ENODEV;
 
 	/* Verify the registers we expect, are actually there. */
 	if ((bp->bigmac_sdev->num_registers != 3) ||
@@ -1182,6 +1193,7 @@ static int __init bigmac_ether_init(struct net_device *dev, struct sbus_dev *qec
 	dev->open = &bigmac_open;
 	dev->stop = &bigmac_close;
 	dev->hard_start_xmit = &bigmac_start_xmit;
+	dev->ethtool_ops = &bigmac_ethtool_ops;
 
 	/* Set links to BigMAC statistic and multi-cast loading code. */
 	dev->get_stats = &bigmac_get_stats;
@@ -1193,7 +1205,11 @@ static int __init bigmac_ether_init(struct net_device *dev, struct sbus_dev *qec
 	/* Finish net device registration. */
 	dev->irq = bp->bigmac_sdev->irqs[0];
 	dev->dma = 0;
-	ether_setup(dev);
+
+	if (register_netdev(dev)) {
+		printk(KERN_ERR "BIGMAC: Cannot register device.\n");
+		goto fail_and_cleanup;
+	}
 
 	/* Put us into the list of instances attached for later driver
 	 * exit.
@@ -1201,32 +1217,35 @@ static int __init bigmac_ether_init(struct net_device *dev, struct sbus_dev *qec
 	bp->next_module = root_bigmac_dev;
 	root_bigmac_dev = bp;
 
+	printk(KERN_INFO "%s: BigMAC 100baseT Ethernet ", dev->name);
+	for (i = 0; i < 6; i++)
+		printk("%2.2x%c", dev->dev_addr[i],
+		       i == 5 ? ' ' : ':');
+	printk("\n");
+
 	return 0;
 
 fail_and_cleanup:
 	/* Something went wrong, undo whatever we did so far. */
-	if (bp) {
-		/* Free register mappings if any. */
-		if (bp->gregs)
-			sbus_iounmap(bp->gregs, GLOB_REG_SIZE);
-		if (bp->creg)
-			sbus_iounmap(bp->creg, CREG_REG_SIZE);
-		if (bp->bregs)
-			sbus_iounmap(bp->bregs, BMAC_REG_SIZE);
-		if (bp->tregs)
-			sbus_iounmap(bp->tregs, TCVR_REG_SIZE);
+	/* Free register mappings if any. */
+	if (bp->gregs)
+		sbus_iounmap(bp->gregs, GLOB_REG_SIZE);
+	if (bp->creg)
+		sbus_iounmap(bp->creg, CREG_REG_SIZE);
+	if (bp->bregs)
+		sbus_iounmap(bp->bregs, BMAC_REG_SIZE);
+	if (bp->tregs)
+		sbus_iounmap(bp->tregs, TCVR_REG_SIZE);
 
-		if (bp->bmac_block)
-			sbus_free_consistent(bp->bigmac_sdev,
-					     PAGE_SIZE,
-					     bp->bmac_block,
-					     bp->bblock_dvma);
+	if (bp->bmac_block)
+		sbus_free_consistent(bp->bigmac_sdev,
+				     PAGE_SIZE,
+				     bp->bmac_block,
+				     bp->bblock_dvma);
 
-		/* Free the BigMAC softc. */
-		kfree(bp);
-		dev->priv = 0;
-	}
-	return res;	/* Return error code. */
+	/* This also frees the co-located 'dev->priv' */
+	free_netdev(dev);
+	return -ENODEV;
 }
 
 /* QEC can be the parent of either QuadEthernet or
@@ -1250,10 +1269,9 @@ static int __init bigmac_match(struct sbus_dev *sdev)
 
 static int __init bigmac_probe(void)
 {
-	struct net_device *dev = NULL;
 	struct sbus_bus *sbus;
 	struct sbus_dev *sdev = 0;
-	static int called = 0;
+	static int called;
 	int cards = 0, v;
 
 	root_bigmac_dev = NULL;
@@ -1264,12 +1282,9 @@ static int __init bigmac_probe(void)
 
 	for_each_sbus(sbus) {
 		for_each_sbusdev(sdev, sbus) {
-			if (cards)
-				dev = NULL;
-
 			if (bigmac_match(sdev)) {
 				cards++;
-				if ((v = bigmac_ether_init(dev, sdev)))
+				if ((v = bigmac_ether_init(sdev)))
 					return v;
 			}
 		}
@@ -1295,10 +1310,11 @@ static void __exit bigmac_cleanup(void)
 				     bp->bblock_dvma);
 
 		unregister_netdev(bp->dev);
-		kfree(bp->dev);
+		free_netdev(bp->dev);
 		root_bigmac_dev = bp_nxt;
 	}
 }
 
 module_init(bigmac_probe);
 module_exit(bigmac_cleanup);
+MODULE_LICENSE("GPL");

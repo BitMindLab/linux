@@ -10,10 +10,6 @@
 #ifndef _ASM_FLOPPY_H
 #define _ASM_FLOPPY_H
 
-#include <asm/bootinfo.h>
-#include <asm/jazz.h>
-#include <asm/jazzdma.h>
-
 struct fd_ops {
 	unsigned char (*fd_inb)(unsigned int port);
 	void (*fd_outb)(unsigned char value, unsigned int port);
@@ -50,7 +46,7 @@ extern struct fd_ops *fd_ops;
 #define fd_clear_dma_ff()	fd_ops->fd_clear_dma_ff(FLOPPY_DMA)
 #define fd_set_dma_mode(mode)	fd_ops->fd_set_dma_mode(FLOPPY_DMA, mode)
 #define fd_set_dma_addr(addr)	fd_ops->fd_set_dma_addr(FLOPPY_DMA, \
-				                       virt_to_bus(addr))
+				                       isa_virt_to_bus(addr))
 #define fd_set_dma_count(count)	fd_ops->fd_set_dma_count(FLOPPY_DMA,count)
 #define fd_get_dma_residue()	fd_ops->fd_get_dma_residue(FLOPPY_DMA)
 
@@ -63,7 +59,8 @@ extern struct fd_ops *fd_ops;
 #define fd_dma_mem_alloc(size)	fd_ops->fd_dma_mem_alloc(size)
 #define fd_dma_mem_free(mem,size) fd_ops->fd_dma_mem_free(mem,size)
 #define fd_drive_type(n)	fd_ops->fd_drive_type(n)
-#define fd_cacheflush(addr,size) dma_cache_wback_inv(addr,size)
+#define fd_cacheflush(addr,size)	\
+			dma_cache_wback_inv((unsigned long)(addr),(size))
 
 #define MAX_BUFFER_SECTORS 24
 
@@ -78,14 +75,6 @@ extern struct fd_ops *fd_ops;
 #define FLOPPY1_TYPE			fd_drive_type(1)
 
 #define FDC1			fd_ops->fd_getfdaddr1();
-
-/*
- * Hack: The floppy drivrer defines this, before including fdreg.h.  We use
- * to define FDC2 only one and keep it a static variable in floppy.c.
- */
-#ifdef FDPATCHES
-static int FDC2 = -1;
-#endif
 
 #define N_FDC 1			/* do you *really* want a second controller? */
 #define N_DRIVE 8
@@ -106,5 +95,7 @@ static int FDC2 = -1;
  * hardware available with MIPS CPUs ...
  */
 #define CROSS_64KB(a,s) ((unsigned long)(a)/K_64 != ((unsigned long)(a) + (s) - 1) / K_64)
+
+#define EXTRA_FLOPPY_PARAMS
 
 #endif /* _ASM_FLOPPY_H */

@@ -20,19 +20,19 @@
 */
 
 /*
- * Hardware independant state machine implemantation
+ * Hardware independent state machine implemantation
  * The following external SMT functions are referenced :
  *
  * 		queue_event()
  * 		smt_timer_start()
  * 		smt_timer_stop()
  *
- * 	The following external HW dependant functions are referenced :
+ * 	The following external HW dependent functions are referenced :
  * 		sm_pm_control()
  *		sm_ph_linestate()
  *		sm_pm_ls_latch()
  *
- * 	The following HW dependant events are required :
+ * 	The following HW dependent events are required :
  *		PC_QLS
  *		PC_ILS
  *		PC_HLS
@@ -714,7 +714,7 @@ int cmd;
 	mib = phy->mib ;
 
 	/*
-	 * general transitions independant of state
+	 * general transitions independent of state
 	 */
 	switch (cmd) {
 	case PC_STOP :
@@ -1722,7 +1722,7 @@ unsigned int cmd;
 	}
 	if (cmd & PL_EBUF_ERR) {	/* elastic buff. det. over-|underflow*/
 		/*
-		 * Check whether the SRF Condition occured.
+		 * Check whether the SRF Condition occurred.
 		 */
 		if (!plc->ebuf_cont && phy->mib->fddiPORTPCMState == PC8_ACTIVE){
 			/*

@@ -11,6 +11,7 @@
  *
  * Contributors:
  * Arnaldo Carvalho de Melo <acme@conectiva.com.br> - 0.86
+ * Daniele Bellucci         <bellucda@tiscali.it>   - 0.87
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -42,19 +43,21 @@
  *		- printk cleanups
  * Version 0.86 (00/08/15):
  * 		- resource release on failure at COMX_init
+ *
+ * Version 0.87 (03/07/09)
+ *              - audit copy_from_user in comxhw_write_proc
  */
 
-#define VERSION "0.86"
+#define VERSION "0.87"
 
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/types.h>
-#include <linux/sched.h>
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/delay.h>
+
 #include <asm/uaccess.h>
 #include <asm/io.h>
 
@@ -63,6 +66,7 @@
 
 MODULE_AUTHOR("Gergely Madarasz <gorgo@itc.hu>, Tivadar Szemethy <tiv@itc.hu>, Arpad Bakay");
 MODULE_DESCRIPTION("Hardware-level driver for the COMX and HICOMX adapters\n");
+MODULE_LICENSE("GPL");
 
 #define	COMX_readw(dev, offset)	(readw(dev->mem_start + offset + \
 	(unsigned int)(((struct comx_privdata *)\
@@ -95,7 +99,7 @@ extern struct comx_hardware hicomx_hw;
 extern struct comx_hardware comx_hw;
 extern struct comx_hardware cmx_hw;
 
-static void COMX_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t COMX_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 
 static void COMX_board_on(struct net_device *dev)
 {
@@ -334,7 +338,7 @@ static inline char comx_line_change(struct net_device *dev, char linestat)
 
 
 
-static void COMX_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t COMX_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = dev_id;
 	struct comx_channel *ch = dev->priv;
@@ -347,7 +351,7 @@ static void COMX_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (dev == NULL) {
 		printk(KERN_ERR "COMX_interrupt: irq %d for unknown device\n", irq);
-		return;
+		return IRQ_NONE;
 	}
 
 	jiffs = jiffies;
@@ -444,6 +448,7 @@ static void COMX_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	}
 
 	ch->HW_release_board(dev, interrupted);
+	return IRQ_HANDLED;
 }
 
 static int COMX_open(struct net_device *dev)
@@ -465,16 +470,16 @@ static int COMX_open(struct net_device *dev)
 	}
 
 	if (!twin_open) {
-		if (check_region(dev->base_addr, hw->io_extent)) {
+		if (!request_region(dev->base_addr, hw->io_extent, dev->name)) {
 			return -EAGAIN;
 		}
 		if (request_irq(dev->irq, COMX_interrupt, 0, dev->name, 
 		   (void *)dev)) {
 			printk(KERN_ERR "comx-hw-comx: unable to obtain irq %d\n", dev->irq);
+			release_region(dev->base_addr, hw->io_extent);
 			return -EAGAIN;
 		}
 		ch->init_status |= IRQ_ALLOCATED;
-		request_region(dev->base_addr, hw->io_extent, dev->name);
 		if (!ch->HW_load_board || ch->HW_load_board(dev)) {
 			ch->init_status &= ~IRQ_ALLOCATED;
 			retval=-ENODEV;
@@ -491,11 +496,11 @@ static int COMX_open(struct net_device *dev)
 
 	COMX_CMD(dev, COMX_CMD_INIT); 
 	jiffs = jiffies;
-	while (COMX_readw(dev, OFF_A_L2_LINKUP) != 1 && jiffies < jiffs + HZ) {
+	while (COMX_readw(dev, OFF_A_L2_LINKUP) != 1 && time_before(jiffies, jiffs + HZ)) {
 		schedule_timeout(1);
 	}
 	
-	if (jiffies >= jiffs + HZ) {
+	if (time_after_eq(jiffies, jiffs + HZ)) {
 		printk(KERN_ERR "%s: board timeout on INIT command\n", dev->name);
 		ch->HW_release_board(dev, savep);
 		retval=-EIO;
@@ -506,11 +511,11 @@ static int COMX_open(struct net_device *dev)
 	COMX_CMD(dev, COMX_CMD_OPEN);
 
 	jiffs = jiffies;
-	while (COMX_readw(dev, OFF_A_L2_LINKUP) != 3 && jiffies < jiffs + HZ) {
+	while (COMX_readw(dev, OFF_A_L2_LINKUP) != 3 && time_before(jiffies, jiffs + HZ)) {
 		schedule_timeout(1);
 	}
 	
-	if (jiffies >= jiffs + HZ) {
+	if (time_after_eq(jiffies, jiffs + HZ)) {
 		printk(KERN_ERR "%s: board timeout on OPEN command\n", dev->name);
 		ch->HW_release_board(dev, savep);
 		retval=-EIO;
@@ -1044,10 +1049,20 @@ static int comxhw_write_proc(struct file *file, const char *buffer,
 		if (!(page = (char *)__get_free_page(GFP_KERNEL))) {
 			return -ENOMEM;
 		}
-		copy_from_user(page, buffer, count = (min(count, PAGE_SIZE)));
-		if (*(page + count - 1) == '\n') {
-			*(page + count - 1) = 0;
+		if(copy_from_user(page, buffer, count = (min_t(int, count, PAGE_SIZE))))
+		{
+			count = -EFAULT;
+			goto out;
 		}
+		if (page[count-1] == '\n')
+			page[count-1] = '\0';
+		else if (count < PAGE_SIZE)
+			page[count] = '\0';
+		else if (page[count]) {
+ 			count = -EINVAL;
+			goto out;
+		}
+		page[count]=0;	/* Null terminate */
 	} else {
 		byte *tmp;
 
@@ -1072,7 +1087,8 @@ static int comxhw_write_proc(struct file *file, const char *buffer,
 		if (hw->firmware->data) {
 			kfree(hw->firmware->data);
 		}
-		copy_from_user(tmp + file->f_pos, buffer, count);
+		if (copy_from_user(tmp + file->f_pos, buffer, count))
+			return -EFAULT;
 		hw->firmware->len = entry->size = file->f_pos + count;
 		hw->firmware->data = tmp;
 		file->f_pos += count;
@@ -1140,7 +1156,7 @@ static int comxhw_write_proc(struct file *file, const char *buffer,
 			hw->clock = kbps ? COMX_CLOCK_CONST/kbps : 0;
 		}
 	}
-
+out:
 	free_page((unsigned long)page);
 	return count;
 }
@@ -1172,8 +1188,10 @@ static int comxhw_read_proc(char *page, char **start, off_t off, int count,
 			len = sprintf(page, "external\n");
 		}
 	} else if (strcmp(file->name, FILENAME_FIRMWARE) == 0) {
-		len = min(FILE_PAGESIZE, min(count, 
-			hw->firmware ? (hw->firmware->len - off) :  0));
+		len = min_t(int, FILE_PAGESIZE,
+			  min_t(int, count, 
+			      hw->firmware ?
+			      (hw->firmware->len - off) : 0));
 		if (len < 0) {
 			len = 0;
 		}
@@ -1193,7 +1211,7 @@ static int comxhw_read_proc(char *page, char **start, off_t off, int count,
 	if (count >= len - off) {
 		*eof = 1;
 	}
-	return(min(count, len - off));
+	return min_t(int, count, len - off);
 }
 
 /* Called on echo comx >boardtype */
@@ -1413,24 +1431,20 @@ static struct comx_hardware hicomx_hw = {
 	NULL
 };
 
-#ifdef MODULE
-#define comx_hw_comx_init init_module
-#endif
-
-int __init comx_hw_comx_init(void)
+static int __init comx_hw_comx_init(void)
 {
 	comx_register_hardware(&comx_hw);
 	comx_register_hardware(&cmx_hw);
 	comx_register_hardware(&hicomx_hw);
-	memset(memory_used, 0, sizeof(memory_used));
 	return 0;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit comx_hw_comx_exit(void)
 {
 	comx_unregister_hardware("comx");
 	comx_unregister_hardware("cmx");
 	comx_unregister_hardware("hicomx");
 }
-#endif
+
+module_init(comx_hw_comx_init);
+module_exit(comx_hw_comx_exit);

@@ -1,7 +1,5 @@
 # This file is included by the global makefile so that you can add your own
-# architecture-specific flags and dependencies. Remember to do have actions
-# for "archclean" and "archdep" for cleaning up and making dependencies for
-# this architecture
+# architecture-specific flags and dependencies.
 #
 # This file is subject to the terms and conditions of the GNU General Public
 # License.  See the file "COPYING" in the main directory of this archive
@@ -12,188 +10,99 @@
 # Rewritten by Cort Dougan and Paul Mackerras
 #
 
-KERNELLOAD	=0xc0000000
+# This must match PAGE_OFFSET in include/asm-ppc/page.h.
+KERNELLOAD	:= $(CONFIG_KERNEL_START)
 
-ifeq ($(shell uname -m),ppc)
-CHECKS		= checks
-endif
-
-ASFLAGS		=
-LINKFLAGS	= -T arch/ppc/vmlinux.lds -Ttext $(KERNELLOAD) -Bstatic
-CPPFLAGS	:= $(CPPFLAGS) -D__powerpc__
-CFLAGS		:= $(CFLAGS) -D__powerpc__ -fsigned-char \
-		-msoft-float -pipe -ffixed-r2 -Wno-uninitialized \
-		-mmultiple -mstring
+LDFLAGS_vmlinux	:= -Ttext $(KERNELLOAD) -Bstatic
+CPPFLAGS	+= -Iarch/$(ARCH)
+AFLAGS		+= -Iarch/$(ARCH)
+cflags-y	+= -Iarch/$(ARCH) -msoft-float -pipe \
+		-ffixed-r2 -Wno-uninitialized -mmultiple -mstring
 CPP		= $(CC) -E $(CFLAGS)
 
-ifdef CONFIG_4xx
-CFLAGS := $(CFLAGS) -mcpu=403
-endif
+cflags-$(CONFIG_4xx)		+= -Wa,-m405
+cflags-$(CONFIG_PPC64BRIDGE)	+= -Wa,-mppc64bridge
 
-ifdef CONFIG_8xx
-CFLAGS := $(CFLAGS) -mcpu=860 -I../8xx_io
-endif
+CFLAGS += $(cflags-y)
 
-ifdef CONFIG_PPC64BRIDGE
-CFLAGS := $(CFLAGS) -Wa,-mppc64bridge
-endif
 
-ifdef CONFIG_4xx
-  HEAD := arch/ppc/kernel/head_4xx.o
-else
-  ifdef CONFIG_8xx
-    HEAD := arch/ppc/kernel/head_8xx.o
-  else
-    HEAD := arch/ppc/kernel/head.o
-  endif
-endif
+head-y				:= arch/ppc/kernel/head.o
+head-$(CONFIG_8xx)		:= arch/ppc/kernel/head_8xx.o
+head-$(CONFIG_4xx)		:= arch/ppc/kernel/head_4xx.o
+head-$(CONFIG_44x)		:= arch/ppc/kernel/head_44x.o
 
-ARCH_SUBDIRS = arch/ppc/kernel arch/ppc/mm arch/ppc/lib
-SUBDIRS := $(SUBDIRS) $(ARCH_SUBDIRS)
-ARCHIVES := arch/ppc/kernel/kernel.o arch/ppc/mm/mm.o arch/ppc/lib/lib.o $(ARCHIVES)
-CORE_FILES := arch/ppc/kernel/kernel.o arch/ppc/mm/mm.o arch/ppc/lib/lib.o $(CORE_FILES)
+head-$(CONFIG_6xx)		+= arch/ppc/kernel/idle_6xx.o
+head-$(CONFIG_POWER4)		+= arch/ppc/kernel/idle_power4.o
 
-ifdef CONFIG_MATH_EMULATION
-SUBDIRS += arch/ppc/math-emu
-ARCHIVES += arch/ppc/math-emu/math-emu.o
-CORE_FILES += arch/ppc/math-emu/math-emu.o
-endif
+core-y				+= arch/ppc/kernel/ arch/ppc/platforms/ \
+				   arch/ppc/mm/ arch/ppc/lib/ arch/ppc/syslib/
+core-$(CONFIG_4xx)		+= arch/ppc/platforms/4xx/
+core-$(CONFIG_MATH_EMULATION)	+= arch/ppc/math-emu/
+core-$(CONFIG_XMON)		+= arch/ppc/xmon/
+core-$(CONFIG_APUS)		+= arch/ppc/amiga/
+drivers-$(CONFIG_8xx)		+= arch/ppc/8xx_io/
+drivers-$(CONFIG_4xx)		+= arch/ppc/4xx_io/
+drivers-$(CONFIG_8260)		+= arch/ppc/8260_io/
+drivers-$(CONFIG_OCP)		+= arch/ppc/ocp/
 
-ifdef CONFIG_XMON
-SUBDIRS += arch/ppc/xmon
-CORE_FILES += arch/ppc/xmon/x.o
-endif
+BOOT_TARGETS = zImage zImage.initrd znetboot znetboot.initrd vmlinux.sm
 
-MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
-MAKECOFFBOOT = $(MAKE) -C arch/$(ARCH)/coffboot
-MAKECHRPBOOT = $(MAKE) -C arch/$(ARCH)/chrpboot
-MAKEMBXBOOT = $(MAKE) -C arch/$(ARCH)/mbxboot
-MAKETREEBOOT = $(MAKE) -C arch/$(ARCH)/treeboot
+.PHONY: $(BOOT_TARGETS)
 
-ifdef CONFIG_8xx
-SUBDIRS += arch/ppc/8xx_io
-DRIVERS += arch/ppc/8xx_io/8xx_io.o
-endif
+all: zImage
 
-ifdef CONFIG_8260
-SUBDIRS += arch/ppc/8260_io
-DRIVERS += arch/ppc/8260_io/8260_io.o
-endif
+AFLAGS_vmlinux.lds.o	:= -Upowerpc
 
-ifdef CONFIG_APUS
-SUBDIRS += arch/ppc/amiga
-ARCHIVES += arch/ppc/amiga/amiga.o
-CORE_FILES += arch/ppc/amiga/amiga.o
-endif
+# All the instructions talk about "make bzImage".
+bzImage: zImage
 
-checks:
-	@$(MAKE) -C arch/$(ARCH)/kernel checks
+boot := arch/$(ARCH)/boot
 
-BOOT_TARGETS = zImage znetboot.initrd zImage.initrd
+$(BOOT_TARGETS): vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $@
 
-ifdef CONFIG_4xx
-$(BOOT_TARGETS): $(CHECKS) vmlinux
-	@$(MAKETREEBOOT) $@
-endif
+uImage: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot)/images $(boot)/images/$@
 
-ifdef CONFIG_8xx
-$(BOOT_TARGETS): $(CHECKS) vmlinux
-	@$(MAKECOFFBOOT) $@
-	@$(MAKEMBXBOOT) $@
-endif
-
-ifdef CONFIG_6xx
-ifndef CONFIG_8260
-$(BOOT_TARGETS): $(CHECKS) vmlinux
-	@$(MAKECOFFBOOT) $@
-	@$(MAKEBOOT) $@
-	@$(MAKECHRPBOOT) $@
-
-znetboot: $(CHECKS) vmlinux
-ifdef CONFIG_ALL_PPC
-ifdef CONFIG_SMP
-	cp -f vmlinux /tftpboot/vmlinux.smp
-else
-	cp -f vmlinux /tftpboot/vmlinux
-endif
-endif
-	@$(MAKECOFFBOOT) $@
-	@$(MAKEBOOT) $@
-	@$(MAKECHRPBOOT) $@
-else
-# 8260 is custom 6xx
-$(BOOT_TARGETS): $(CHECKS) vmlinux
-	@$(MAKECOFFBOOT) $@
-	@$(MAKEMBXBOOT) $@
-endif
-endif
-
-ifdef CONFIG_PPC64BRIDGE
-$(BOOT_TARGETS): $(CHECKS) vmlinux
-	@$(MAKECOFFBOOT) $@
-	@$(MAKEBOOT) $@
-	@$(MAKECHRPBOOT) $@
-
-znetboot: $(CHECKS) vmlinux
-	cp -f vmlinux /tftpboot/vmlinux.64
-	@$(MAKECOFFBOOT) $@
-	@$(MAKEBOOT) $@
-	@$(MAKECHRPBOOT) $@
-endif
-
-.PHONY: clean_config
-clean_config:
-	rm -f .config arch/ppc/defconfig
-
-gemini_config: clean_config
-	cp -f arch/ppc/configs/gemini_defconfig arch/ppc/defconfig
-
-pmac_config: clean_config
-	cp -f arch/ppc/configs/pmac_defconfig arch/ppc/defconfig
-
-prep_config: clean_config
-	cp -f arch/ppc/configs/prep_defconfig arch/ppc/defconfig
-
-chrp_config: clean_config
-	cp -f arch/ppc/configs/chrp_defconfig arch/ppc/defconfig
-
-common_config: clean_config
-	cp -f arch/ppc/configs/common_defconfig arch/ppc/defconfig
-
-mbx_config: clean_config
-	cp -f arch/ppc/configs/mbx_defconfig arch/ppc/defconfig
-
-apus_config: clean_config
-	cp -f arch/ppc/configs/apus_defconfig arch/ppc/defconfig
-
-oak_config: clean_config
-	cp -f arch/ppc/configs/oak_defconfig arch/ppc/defconfig
-
-walnut_config: clean_config
-	cp -f arch/ppc/configs/walnut_defconfig arch/ppc/defconfig
-
-rpxlite_config: clean_config
-	cp -f arch/ppc/configs/rpxlite_defconfig arch/ppc/defconfig
-
-rpxcllf_config: clean_config
-	cp -f arch/ppc/configs/rpxcllf_defconfig arch/ppc/defconfig
-
-bseip_config: clean_config
-	cp -f arch/ppc/configs/bseip_defconfig arch/ppc/defconfig
-
-est8260_config: clean_config
-	cp -f arch/ppc/configs/est8260_defconfig arch/ppc/defconfig
+define archhelp
+  @echo '* zImage          - Compressed kernel image (arch/$(ARCH)/boot/images/zImage.*)'
+  @echo '  uImage          - Create a bootable image for U-Boot / PPCBoot'
+  @echo '  install         - Install kernel using'
+  @echo '                    (your) ~/bin/installkernel or'
+  @echo '                    (distribution) /sbin/installkernel or'
+  @echo '                    install to $$(INSTALL_PATH) and run lilo'
+  @echo '  *_defconfig     - Select default config from arch/$(ARCH)/ppc/configs'
+endef
 
 archclean:
-	rm -f arch/ppc/kernel/{mk_defs,ppc_defs.h,find_name,checks}
-	@$(MAKECOFFBOOT) clean
-	@$(MAKEBOOT) clean
-	@$(MAKECHRPBOOT) clean
-	@$(MAKEMBXBOOT) clean
-	@$(MAKETREEBOOT) clean
+	$(Q)$(MAKE) $(clean)=arch/ppc/boot
 
-archmrproper:
+prepare: include/asm-$(ARCH)/offsets.h checkbin
 
-archdep:
-	$(MAKEBOOT) fastdep
-	$(MAKECHRPBOOT) fastdep
+arch/$(ARCH)/kernel/asm-offsets.s: include/asm include/linux/version.h \
+				   include/config/MARKER
+
+include/asm-$(ARCH)/offsets.h: arch/$(ARCH)/kernel/asm-offsets.s
+	$(call filechk,gen-asm-offsets)
+
+ifdef CONFIG_6xx
+# Ensure this is binutils 2.12.1 (or 2.12.90.0.7) or later
+NEW_AS	:= $(shell echo dssall | $(AS) -o /dev/null >/dev/null 2>&1 ; echo $$?)
+GOODVER	:= 2.12.1
+else
+NEW_AS	:= 0
+endif
+
+ifneq ($(NEW_AS),0)
+checkbin:
+	@echo -n '*** ${VERSION}.${PATCHLEVEL} kernels no longer build'
+	@echo 'correctly with old versions of binutils.'
+	@echo '*** Please upgrade your binutils to ${GOODVER} or newer'
+	@false
+else
+checkbin:
+	@true
+endif
+
+CLEAN_FILES +=	include/asm-$(ARCH)/offsets.h \
+		arch/$(ARCH)/kernel/asm-offsets.s

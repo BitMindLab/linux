@@ -1,12 +1,11 @@
 #ifndef _ALPHA_SPINLOCK_H
 #define _ALPHA_SPINLOCK_H
 
+#include <linux/config.h>
 #include <asm/system.h>
 #include <linux/kernel.h>
 #include <asm/current.h>
 
-#define DEBUG_SPINLOCK 0
-#define DEBUG_RWLOCK 0
 
 /*
  * Simple spin lock operations.  There are two variants, one clears IRQ's
@@ -17,7 +16,7 @@
 
 typedef struct {
 	volatile unsigned int lock /*__attribute__((aligned(32))) */;
-#if DEBUG_SPINLOCK
+#ifdef CONFIG_DEBUG_SPINLOCK
 	int on_cpu;
 	int line_no;
 	void *previous;
@@ -26,7 +25,7 @@ typedef struct {
 #endif
 } spinlock_t;
 
-#if DEBUG_SPINLOCK
+#ifdef CONFIG_DEBUG_SPINLOCK
 #define SPIN_LOCK_UNLOCKED (spinlock_t) {0, -1, 0, 0, 0, 0}
 #define spin_lock_init(x)						\
 	((x)->lock = 0, (x)->on_cpu = -1, (x)->previous = 0, (x)->task = 0)
@@ -38,13 +37,13 @@ typedef struct {
 #define spin_is_locked(x)	((x)->lock != 0)
 #define spin_unlock_wait(x)	({ do { barrier(); } while ((x)->lock); })
 
-#if DEBUG_SPINLOCK
-extern void spin_unlock(spinlock_t * lock);
+#ifdef CONFIG_DEBUG_SPINLOCK
+extern void _raw_spin_unlock(spinlock_t * lock);
 extern void debug_spin_lock(spinlock_t * lock, const char *, int);
 extern int debug_spin_trylock(spinlock_t * lock, const char *, int);
 
-#define spin_lock(LOCK) debug_spin_lock(LOCK, __BASE_FILE__, __LINE__)
-#define spin_trylock(LOCK) debug_spin_trylock(LOCK, __BASE_FILE__, __LINE__)
+#define _raw_spin_lock(LOCK) debug_spin_lock(LOCK, __BASE_FILE__, __LINE__)
+#define _raw_spin_trylock(LOCK) debug_spin_trylock(LOCK, __BASE_FILE__, __LINE__)
 
 #define spin_lock_own(LOCK, LOCATION)					\
 do {									\
@@ -55,13 +54,13 @@ do {									\
 		       (LOCK)->lock ? "taken" : "freed", (LOCK)->on_cpu); \
 } while (0)
 #else
-static inline void spin_unlock(spinlock_t * lock)
+static inline void _raw_spin_unlock(spinlock_t * lock)
 {
 	mb();
 	lock->lock = 0;
 }
 
-static inline void spin_lock(spinlock_t * lock)
+static inline void _raw_spin_lock(spinlock_t * lock)
 {
 	long tmp;
 
@@ -84,9 +83,13 @@ static inline void spin_lock(spinlock_t * lock)
 	: "m"(lock->lock) : "memory");
 }
 
-#define spin_trylock(lock) (!test_and_set_bit(0,(lock)))
+static inline int _raw_spin_trylock(spinlock_t *lock)
+{
+	return !test_and_set_bit(0, &lock->lock);
+}
+
 #define spin_lock_own(LOCK, LOCATION)	((void)0)
-#endif /* DEBUG_SPINLOCK */
+#endif /* CONFIG_DEBUG_SPINLOCK */
 
 /***********************************************************/
 
@@ -96,11 +99,14 @@ typedef struct {
 
 #define RW_LOCK_UNLOCKED (rwlock_t) { 0, 0 }
 
-#if DEBUG_RWLOCK
-extern void write_lock(rwlock_t * lock);
-extern void read_lock(rwlock_t * lock);
+#define rwlock_init(x)	do { *(x) = RW_LOCK_UNLOCKED; } while(0)
+#define rwlock_is_locked(x)	(*(volatile int *)(x) != 0)
+
+#ifdef CONFIG_DEBUG_RWLOCK
+extern void _raw_write_lock(rwlock_t * lock);
+extern void _raw_read_lock(rwlock_t * lock);
 #else
-static inline void write_lock(rwlock_t * lock)
+static inline void _raw_write_lock(rwlock_t * lock)
 {
 	long regx;
 
@@ -116,11 +122,11 @@ static inline void write_lock(rwlock_t * lock)
 	"	bne	%1,6b\n"
 	"	br	1b\n"
 	".previous"
-	: "=m" (*(volatile int *)lock), "=&r" (regx)
-	: "0" (*(volatile int *)lock) : "memory");
+	: "=m" (*lock), "=&r" (regx)
+	: "0" (*lock) : "memory");
 }
 
-static inline void read_lock(rwlock_t * lock)
+static inline void _raw_read_lock(rwlock_t * lock)
 {
 	long regx;
 
@@ -136,18 +142,18 @@ static inline void read_lock(rwlock_t * lock)
 	"	blbs	%1,6b\n"
 	"	br	1b\n"
 	".previous"
-	: "=m" (*(volatile int *)lock), "=&r" (regx)
-	: "m" (*(volatile int *)lock) : "memory");
+	: "=m" (*lock), "=&r" (regx)
+	: "m" (*lock) : "memory");
 }
-#endif /* DEBUG_RWLOCK */
+#endif /* CONFIG_DEBUG_RWLOCK */
 
-static inline void write_unlock(rwlock_t * lock)
+static inline void _raw_write_unlock(rwlock_t * lock)
 {
 	mb();
 	*(volatile int *)lock = 0;
 }
 
-static inline void read_unlock(rwlock_t * lock)
+static inline void _raw_read_unlock(rwlock_t * lock)
 {
 	long regx;
 	__asm__ __volatile__(
@@ -159,8 +165,8 @@ static inline void read_unlock(rwlock_t * lock)
 	".subsection 2\n"
 	"6:	br	1b\n"
 	".previous"
-	: "=m" (*(volatile int *)lock), "=&r" (regx)
-	: "m" (*(volatile int *)lock) : "memory");
+	: "=m" (*lock), "=&r" (regx)
+	: "m" (*lock) : "memory");
 }
 
 #endif /* _ALPHA_SPINLOCK_H */

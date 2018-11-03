@@ -1,6 +1,6 @@
 /* Derived from Applicom driver ac.c for SCO Unix                            */
 /* Ported by David Woodhouse, Axiom (Cambridge) Ltd.                         */
-/* Dave@mvhi.com  30/8/98                                                    */
+/* dwmw2@redhat.com  30/8/98                                                 */
 /* $Id: ac.c,v 1.30 2000/03/22 16:03:57 dwmw2 Exp $			     */
 /* This module is for Linux 2.1 and 2.2 series kernels.                      */
 /*****************************************************************************/
@@ -22,27 +22,19 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/malloc.h>
-#include <asm/errno.h>
-#include <asm/io.h>
-#include <asm/uaccess.h>
+#include <linux/interrupt.h>
+#include <linux/slab.h>
+#include <linux/errno.h>
 #include <linux/miscdevice.h>
 #include <linux/pci.h>
 #include <linux/wait.h>
 #include <linux/init.h>
-#include <linux/compatmac.h>
+
+#include <asm/io.h>
+#include <asm/uaccess.h>
 
 #include "applicom.h"
 
-#if LINUX_VERSION_CODE < 0x20300 
-/* These probably want adding to <linux/compatmac.h> */
-#define init_waitqueue_head(x) do { *(x) = NULL; } while (0);
-#define PCI_BASE_ADDRESS(dev) (dev->base_address[0])
-#define DECLARE_WAIT_QUEUE_HEAD(x) struct wait_queue *x
-#define __setup(x,y) /* */
-#else
-#define PCI_BASE_ADDRESS(dev) (dev->resource[0].start)
-#endif
 
 /* NOTE: We use for loops with {write,read}b() instead of 
    memcpy_{from,to}io throughout this driver. This is because
@@ -72,8 +64,20 @@ static char *applicom_pci_devnames[] = {
 	"PCI2000PFB"
 };
 
+static struct pci_device_id applicom_pci_tbl[] = {
+	{ PCI_VENDOR_ID_APPLICOM, PCI_DEVICE_ID_APPLICOM_PCIGENERIC,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ PCI_VENDOR_ID_APPLICOM, PCI_DEVICE_ID_APPLICOM_PCI2000IBS_CAN,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ PCI_VENDOR_ID_APPLICOM, PCI_DEVICE_ID_APPLICOM_PCI2000PFB,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ 0 }
+};
+MODULE_DEVICE_TABLE(pci, applicom_pci_tbl);
+
 MODULE_AUTHOR("David Woodhouse & Applicom International");
 MODULE_DESCRIPTION("Driver for Applicom Profibus card");
+MODULE_LICENSE("GPL");
 MODULE_PARM(irq, "i");
 MODULE_PARM_DESC(irq, "IRQ of the Applicom board");
 MODULE_PARM(mem, "i");
@@ -82,7 +86,7 @@ MODULE_PARM_DESC(mem, "Shared Memory Address of Applicom board");
 MODULE_SUPPORTED_DEVICE("ac");
 
 
-struct applicom_board {
+static struct applicom_board {
 	unsigned long PhysIO;
 	unsigned long RamIO;
 	wait_queue_head_t FlagSleepSend;
@@ -100,22 +104,21 @@ static unsigned int WriteErrorCount;	/* number of write error      */
 static unsigned int ReadErrorCount;	/* number of read error       */
 static unsigned int DeviceErrorCount;	/* number of device error     */
 
-static loff_t ac_llseek(struct file *, loff_t, int);
 static ssize_t ac_read (struct file *, char *, size_t, loff_t *);
 static ssize_t ac_write (struct file *, const char *, size_t, loff_t *);
 static int ac_ioctl(struct inode *, struct file *, unsigned int,
 		    unsigned long);
-static void ac_interrupt(int, void *, struct pt_regs *);
+static irqreturn_t ac_interrupt(int, void *, struct pt_regs *);
 
-struct file_operations ac_fops = {
-	owner:THIS_MODULE,
-	llseek:ac_llseek,
-	read:ac_read,
-	write:ac_write,
-	ioctl:ac_ioctl,
+static struct file_operations ac_fops = {
+	.owner = THIS_MODULE,
+	.llseek = no_llseek,
+	.read = ac_read,
+	.write = ac_write,
+	.ioctl = ac_ioctl,
 };
 
-struct miscdevice ac_miscdev = {
+static struct miscdevice ac_miscdev = {
 	AC_MINOR,
 	"ac",
 	&ac_fops
@@ -123,7 +126,7 @@ struct miscdevice ac_miscdev = {
 
 static int dummy;	/* dev_id for request_irq() */
 
-int ac_register_board(unsigned long physloc, unsigned long loc, 
+static int ac_register_board(unsigned long physloc, unsigned long loc, 
 		      unsigned char boardno)
 {
 	volatile unsigned char byte_reset_it;
@@ -207,27 +210,30 @@ int __init applicom_init(void)
 		if (pci_enable_device(dev))
 			return -EIO;
 
-		RamIO = ioremap(PCI_BASE_ADDRESS(dev), LEN_RAM_IO);
+		RamIO = ioremap(dev->resource[0].start, LEN_RAM_IO);
 
 		if (!RamIO) {
-			printk(KERN_INFO "ac.o: Failed to ioremap PCI memory space at 0x%lx\n", PCI_BASE_ADDRESS(dev));
+			printk(KERN_INFO "ac.o: Failed to ioremap PCI memory space at 0x%lx\n", dev->resource[0].start);
+			pci_disable_device(dev);
 			return -EIO;
 		}
 
 		printk(KERN_INFO "Applicom %s found at mem 0x%lx, irq %d\n",
-		       applicom_pci_devnames[dev->device-1], PCI_BASE_ADDRESS(dev), 
+		       applicom_pci_devnames[dev->device-1], dev->resource[0].start, 
 		       dev->irq);
 
-		if (!(boardno = ac_register_board(PCI_BASE_ADDRESS(dev),
+		if (!(boardno = ac_register_board(dev->resource[0].start,
 						  (unsigned long)RamIO,0))) {
 			printk(KERN_INFO "ac.o: PCI Applicom device doesn't have correct signature.\n");
 			iounmap(RamIO);
+			pci_disable_device(dev);
 			continue;
 		}
 
 		if (request_irq(dev->irq, &ac_interrupt, SA_SHIRQ, "Applicom PCI", &dummy)) {
 			printk(KERN_INFO "Could not allocate IRQ %d for PCI Applicom device.\n", dev->irq);
 			iounmap(RamIO);
+			pci_disable_device(dev);
 			apbs[boardno - 1].RamIO = 0;
 			continue;
 		}
@@ -254,11 +260,6 @@ int __init applicom_init(void)
 
 	/* Now try the specified ISA cards */
 
-	RamIO = ioremap(mem, LEN_RAM_IO * MAX_ISA_BOARD);
-
-	if (!RamIO) 
-		printk(KERN_INFO "ac.o: Failed to ioremap ISA memory space at 0x%lx\n", mem);
-
 	for (i = 0; i < MAX_ISA_BOARD; i++) {
 		RamIO = ioremap(mem + (LEN_RAM_IO * i), LEN_RAM_IO);
 
@@ -281,7 +282,8 @@ int __init applicom_init(void)
 				iounmap((void *) RamIO);
 				apbs[boardno - 1].RamIO = 0;
 			}
-			apbs[boardno - 1].irq = irq;
+			else
+				apbs[boardno - 1].irq = irq;
 		}
 		else
 			apbs[boardno - 1].irq = 0;
@@ -339,11 +341,6 @@ int __init applicom_init(void)
 #ifndef MODULE
 __initcall(applicom_init);
 #endif
-
-static loff_t ac_llseek(struct file *file, loff_t offset, int origin)
-{
-	return -ESPIPE;
-}
 
 static ssize_t ac_write(struct file *file, const char *buf, size_t count, loff_t * ppos)
 {
@@ -421,7 +418,7 @@ static ssize_t ac_write(struct file *file, const char *buf, size_t count, loff_t
 	}
 	
 	/* Place ourselves on the wait queue */
-	current->state = TASK_INTERRUPTIBLE;
+	set_current_state(TASK_INTERRUPTIBLE);
 	add_wait_queue(&apbs[IndexCard].FlagSleepSend, &wait);
 
 	/* Check whether the card is ready for us */
@@ -435,12 +432,13 @@ static ssize_t ac_write(struct file *file, const char *buf, size_t count, loff_t
 			remove_wait_queue(&apbs[IndexCard].FlagSleepSend,
 					  &wait);
 			return -EINTR;
-	}
+		}
 		spin_lock_irqsave(&apbs[IndexCard].mutex, flags);
+		set_current_state(TASK_INTERRUPTIBLE);
 	}
 
 	/* We may not have actually slept */
-	current->state = TASK_RUNNING;
+	set_current_state(TASK_RUNNING);
 	remove_wait_queue(&apbs[IndexCard].FlagSleepSend, &wait);
 
 	writeb(1, apbs[IndexCard].RamIO + DATA_FROM_PC_READY);
@@ -521,7 +519,7 @@ static int do_ac_read(int IndexCard, char *buf)
 		printk("\n");
 #endif
 
-	/* Je suis stupide. DW. */
+#warning "Je suis stupide. DW. - copy*user in cli"
 
 	if (copy_to_user(buf, &st_loc, sizeof(struct st_ram_io)))
 		return -EFAULT;
@@ -550,7 +548,7 @@ static ssize_t ac_read (struct file *filp, char *buf, size_t count, loff_t *ptr)
 	
 	while(1) {
 		/* Stick ourself on the wait queue */
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		add_wait_queue(&FlagSleepRec, &wait);
 		
 		/* Scan each board, looking for one which has a packet for us */
@@ -565,7 +563,7 @@ static ssize_t ac_read (struct file *filp, char *buf, size_t count, loff_t *ptr)
 				/* Got a packet for us */
 				ret = do_ac_read(i, buf);
 				spin_unlock_irqrestore(&apbs[i].mutex, flags);
-				current->state = TASK_RUNNING;
+				set_current_state(TASK_RUNNING);
 				remove_wait_queue(&FlagSleepRec, &wait);
 				return tmp;
 			}
@@ -575,7 +573,7 @@ static ssize_t ac_read (struct file *filp, char *buf, size_t count, loff_t *ptr)
 				Dummy = readb(apbs[i].RamIO + VERS);
 				
 				spin_unlock_irqrestore(&apbs[i].mutex, flags);
-				current->state = TASK_RUNNING;
+				set_current_state(TASK_RUNNING);
 				remove_wait_queue(&FlagSleepRec, &wait);
 				
 				printk(KERN_WARNING "APPLICOM driver read error board %d, DataToPcReady = %d\n",
@@ -606,11 +604,12 @@ static ssize_t ac_read (struct file *filp, char *buf, size_t count, loff_t *ptr)
 	} 
 }
 
-static void ac_interrupt(int vec, void *dev_instance, struct pt_regs *regs)
+static irqreturn_t ac_interrupt(int vec, void *dev_instance, struct pt_regs *regs)
 {
 	unsigned int i;
 	unsigned int FlagInt;
 	unsigned int LoopCount;
+	int handled = 0;
 
 	//    printk("Applicom interrupt on IRQ %d occurred\n", vec);
 
@@ -632,6 +631,7 @@ static void ac_interrupt(int vec, void *dev_instance, struct pt_regs *regs)
 				continue;
 			}
 
+			handled = 1;
 			FlagInt = 1;
 			writeb(0, apbs[i].RamIO + RAM_IT_TO_PC);
 
@@ -675,6 +675,7 @@ static void ac_interrupt(int vec, void *dev_instance, struct pt_regs *regs)
 		else
 			LoopCount++;
 	} while(LoopCount < 2);
+	return IRQ_RETVAL(handled);
 }
 
 

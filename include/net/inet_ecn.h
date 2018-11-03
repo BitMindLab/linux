@@ -1,9 +1,7 @@
 #ifndef _INET_ECN_H_
 #define _INET_ECN_H_
 
-#include <linux/config.h>
-
-#ifdef CONFIG_INET_ECN
+#include <linux/ip.h>
 
 static inline int INET_ECN_is_ce(__u8 dsfield)
 {
@@ -28,29 +26,17 @@ static inline __u8 INET_ECN_encapsulate(__u8 outer, __u8 inner)
 	return outer;
 }
 
-#define	INET_ECN_xmit(sk) do { (sk)->protinfo.af_inet.tos |= 2; } while (0)
-#define	INET_ECN_dontxmit(sk) do { (sk)->protinfo.af_inet.tos &= ~3; } while (0)
+#define	INET_ECN_xmit(sk) do { inet_sk(sk)->tos |= 2; } while (0)
+#define	INET_ECN_dontxmit(sk) do { inet_sk(sk)->tos &= ~3; } while (0)
 
 #define IP6_ECN_flow_init(label) do {	\
       (label) &= ~htonl(3<<20);		\
     } while (0)
 
 #define	IP6_ECN_flow_xmit(sk, label) do {			\
-	if (INET_ECN_is_capable((sk)->protinfo.af_inet.tos))	\
+	if (INET_ECN_is_capable(inet_sk(sk)->tos))		\
 		(label) |= __constant_htons(2 << 4);		\
     } while (0)
-
-
-#else
-#define INET_ECN_is_ce(x...)		(0)
-#define INET_ECN_is_not_ce(x...)	(0)
-#define INET_ECN_is_capable(x...)	(0)
-#define INET_ECN_encapsulate(x, y)	(x)
-#define IP6_ECN_flow_init(x...)		do { } while (0)
-#define	IP6_ECN_flow_xmit(x...)		do { } while (0)
-#define	INET_ECN_xmit(x...)		do { } while (0)
-#define	INET_ECN_dontxmit(x...)		do { } while (0)
-#endif
 
 static inline void IP_ECN_set_ce(struct iphdr *iph)
 {
@@ -60,11 +46,21 @@ static inline void IP_ECN_set_ce(struct iphdr *iph)
 	iph->tos |= 1;
 }
 
+static inline void IP_ECN_clear(struct iphdr *iph)
+{
+	iph->tos &= ~3;
+}
+
 struct ipv6hdr;
 
 static inline void IP6_ECN_set_ce(struct ipv6hdr *iph)
 {
 	*(u32*)iph |= htonl(1<<20);
+}
+
+static inline void IP6_ECN_clear(struct ipv6hdr *iph)
+{
+	*(u32*)iph &= ~htonl(3<<20);
 }
 
 #define ip6_get_dsfield(iph) ((ntohs(*(u16*)(iph)) >> 4) & 0xFF)

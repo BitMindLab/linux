@@ -1,15 +1,16 @@
 /*
 	drivers/net/tulip/timer.c
 
-	Maintained by Jeff Garzik <jgarzik@mandrakesoft.com>
-	Copyright 2000  The Linux Kernel Team
-	Written/copyright 1994-1999 by Donald Becker.
+	Maintained by Jeff Garzik <jgarzik@pobox.com>
+	Copyright 2000,2001  The Linux Kernel Team
+	Written/copyright 1994-2001 by Donald Becker.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	Please refer to Documentation/networking/tulip.txt for more
-	information on this driver.
+	Please refer to Documentation/DocBook/tulip.{pdf,ps,html}
+	for more information on this driver, or visit the project
+	Web page at http://sourceforge.net/projects/tulip/
 
 */
 
@@ -32,60 +33,6 @@ void tulip_timer(unsigned long data)
 			   inl(ioaddr + CSR14), inl(ioaddr + CSR15));
 	}
 	switch (tp->chip_id) {
-	case DC21040:
-		if (!tp->medialock  &&  csr12 & 0x0002) { /* Network error */
-			printk(KERN_INFO "%s: No link beat found.\n",
-				   dev->name);
-			dev->if_port = (dev->if_port == 2 ? 0 : 2);
-			tulip_select_media(dev, 0);
-			dev->trans_start = jiffies;
-		}
-		break;
-	case DC21041:
-		if (tulip_debug > 2)
-			printk(KERN_DEBUG "%s: 21041 media tick  CSR12 %8.8x.\n",
-				   dev->name, csr12);
-		if (tp->medialock) break;
-		switch (dev->if_port) {
-		case 0: case 3: case 4:
-		  if (csr12 & 0x0004) { /*LnkFail */
-			/* 10baseT is dead.  Check for activity on alternate port. */
-			tp->mediasense = 1;
-			if (csr12 & 0x0200)
-				dev->if_port = 2;
-			else
-				dev->if_port = 1;
-			printk(KERN_INFO "%s: No 21041 10baseT link beat, Media switched to %s.\n",
-				   dev->name, medianame[dev->if_port]);
-			outl(0, ioaddr + CSR13); /* Reset */
-			outl(t21041_csr14[dev->if_port], ioaddr + CSR14);
-			outl(t21041_csr15[dev->if_port], ioaddr + CSR15);
-			outl(t21041_csr13[dev->if_port], ioaddr + CSR13);
-			next_tick = 10*HZ;			/* 2.4 sec. */
-		  } else
-			next_tick = 30*HZ;
-		  break;
-		case 1:					/* 10base2 */
-		case 2:					/* AUI */
-			if (csr12 & 0x0100) {
-				next_tick = (30*HZ);			/* 30 sec. */
-				tp->mediasense = 0;
-			} else if ((csr12 & 0x0004) == 0) {
-				printk(KERN_INFO "%s: 21041 media switched to 10baseT.\n",
-					   dev->name);
-				dev->if_port = 0;
-				tulip_select_media(dev, 0);
-				next_tick = (24*HZ)/10;				/* 2.4 sec. */
-			} else if (tp->mediasense || (csr12 & 0x0002)) {
-				dev->if_port = 3 - dev->if_port; /* Swap ports. */
-				tulip_select_media(dev, 0);
-				next_tick = 20*HZ;
-			} else {
-				next_tick = 20*HZ;
-			}
-			break;
-		}
-		break;
 	case DC21140:
 	case DC21142:
 	case MX98713:
@@ -133,7 +80,7 @@ void tulip_timer(unsigned long data)
 				((csr12 & (1 << ((bitnum >> 1) & 7))) != 0)) {
 				if (tulip_debug > 2)
 					printk(KERN_DEBUG "%s: Link beat detected for %s.\n", dev->name,
-						   medianame[mleaf->media]);
+					       medianame[mleaf->media & MEDIA_MASK]);
 				if ((p[2] & 0x61) == 0x01)	/* Bogus Znyx board. */
 					goto actually_mii;
 				netif_carrier_on(dev);
@@ -152,22 +99,24 @@ void tulip_timer(unsigned long data)
 				goto select_next_media; /* Skip FD entries. */
 			if (tulip_debug > 1)
 				printk(KERN_DEBUG "%s: No link beat on media %s,"
-					   " trying transceiver type %s.\n",
-					   dev->name, medianame[mleaf->media & 15],
-					   medianame[tp->mtable->mleaf[tp->cur_index].media]);
+				       " trying transceiver type %s.\n",
+				       dev->name, medianame[mleaf->media & MEDIA_MASK],
+				       medianame[tp->mtable->mleaf[tp->cur_index].media]);
 			tulip_select_media(dev, 0);
 			/* Restart the transmit process. */
-			tulip_restart_rxtx(tp, tp->csr6);
+			tulip_restart_rxtx(tp);
 			next_tick = (24*HZ)/10;
 			break;
 		}
 		case 1:  case 3:		/* 21140, 21142 MII */
 		actually_mii:
-			if (tulip_check_duplex(dev) < 0)
+			if (tulip_check_duplex(dev) < 0) {
 				netif_carrier_off(dev);
-			else
+				next_tick = 3*HZ;
+			} else {
 				netif_carrier_on(dev);
-			next_tick = 60*HZ;
+				next_tick = 60*HZ;
+			}
 			break;
 		case 2:					/* 21142 serial block has no link beat. */
 		default:

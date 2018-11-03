@@ -24,7 +24,6 @@
 #define VERSION "0.80"
 
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
@@ -212,7 +211,7 @@ static int comxlapb_read_proc(char *page, char **start, off_t off, int count,
 	if (count >= len - off) {
 		*eof = 1;
 	}
-	return ( min(count, len - off) );
+	return min_t(int, count, len - off);
 }
 
 static int comxlapb_write_proc(struct file *file, const char *buffer, 
@@ -232,7 +231,10 @@ static int comxlapb_write_proc(struct file *file, const char *buffer,
 		return -ENOMEM;
 	}
 
-	copy_from_user(page, buffer, count);
+	if (copy_from_user(page, buffer, count)) {
+		free_page((unsigned long)page);
+		return -EFAULT;
+	}
 	if (*(page + count - 1) == '\n') {
 		*(page + count - 1) = 0;
 	}
@@ -311,6 +313,7 @@ static void comxlapb_connected(void *token, int reason)
 		skb->pkt_type = PACKET_HOST;
 
 		netif_rx(skb);
+		ch->dev->last_rx = jiffies;
 	}
 
 	for (; comxdir; comxdir = comxdir->next) {
@@ -350,6 +353,7 @@ static void comxlapb_disconnected(void *token, int reason)
 		skb->pkt_type = PACKET_HOST;
 
 		netif_rx(skb);
+		ch->dev->last_rx = jiffies;
 	}
 
 	for (; comxdir; comxdir = comxdir->next) {
@@ -368,6 +372,10 @@ static int comxlapb_data_indication(void *token, struct sk_buff *skb)
 
 	if (ch->dev->type == ARPHRD_X25) {
 		skb_push(skb, 1);
+
+		if (skb_cow(skb, 1))
+			return NET_RX_DROP;
+
 		skb->data[0] = 0;	// indicate data for X25
 		skb->protocol = htons(ETH_P_X25);
 	} else {
@@ -521,7 +529,7 @@ static struct comx_protocol comx25_protocol = {
 	NULL 
 };
 
-int __init comx_proto_lapb_init(void)
+static int __init comx_proto_lapb_init(void)
 {
 	int ret;
 
@@ -537,7 +545,7 @@ static void __exit comx_proto_lapb_exit(void)
 	comx_unregister_protocol(comx25_protocol.name);
 }
 
-#ifdef MODULE
 module_init(comx_proto_lapb_init);
-#endif
 module_exit(comx_proto_lapb_exit);
+
+MODULE_LICENSE("GPL");

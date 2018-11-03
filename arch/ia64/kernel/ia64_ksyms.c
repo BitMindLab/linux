@@ -6,7 +6,8 @@
 #include <linux/module.h>
 
 #include <linux/string.h>
-EXPORT_SYMBOL_NOVERS(memset);
+EXPORT_SYMBOL_NOVERS(memset);			/* gcc generates direct calls to memset()... */
+EXPORT_SYMBOL(memchr);
 EXPORT_SYMBOL(memcmp);
 EXPORT_SYMBOL_NOVERS(memcpy);
 EXPORT_SYMBOL(memmove);
@@ -22,34 +23,49 @@ EXPORT_SYMBOL(strncpy);
 EXPORT_SYMBOL(strnlen);
 EXPORT_SYMBOL(strrchr);
 EXPORT_SYMBOL(strstr);
-EXPORT_SYMBOL(strtok);
+EXPORT_SYMBOL(strpbrk);
 
-#include <asm/hw_irq.h>
+#include <linux/irq.h>
 EXPORT_SYMBOL(isa_irq_to_vector_map);
+EXPORT_SYMBOL(enable_irq);
+EXPORT_SYMBOL(disable_irq);
+EXPORT_SYMBOL(disable_irq_nosync);
 
-#include <linux/in6.h>
+#include <linux/interrupt.h>
+EXPORT_SYMBOL(probe_irq_mask);
+
 #include <asm/checksum.h>
-/* not coded yet?? EXPORT_SYMBOL(csum_ipv6_magic); */
-EXPORT_SYMBOL(csum_partial_copy_nocheck);
-EXPORT_SYMBOL(csum_tcpudp_magic);
-EXPORT_SYMBOL(ip_compute_csum);
-EXPORT_SYMBOL(ip_fast_csum);
+EXPORT_SYMBOL(ip_fast_csum);		/* hand-coded assembly */
 
 #include <asm/io.h>
 EXPORT_SYMBOL(__ia64_memcpy_fromio);
 EXPORT_SYMBOL(__ia64_memcpy_toio);
 EXPORT_SYMBOL(__ia64_memset_c_io);
+EXPORT_SYMBOL(io_space);
 
-#include <asm/irq.h>
-EXPORT_SYMBOL(enable_irq);
-EXPORT_SYMBOL(disable_irq);
-EXPORT_SYMBOL(disable_irq_nosync);
+#include <asm/semaphore.h>
+EXPORT_SYMBOL_NOVERS(__down);
+EXPORT_SYMBOL_NOVERS(__down_interruptible);
+EXPORT_SYMBOL_NOVERS(__down_trylock);
+EXPORT_SYMBOL_NOVERS(__up);
 
 #include <asm/page.h>
 EXPORT_SYMBOL(clear_page);
 
+#ifdef CONFIG_VIRTUAL_MEM_MAP
+#include <linux/bootmem.h>
+#include <asm/pgtable.h>
+EXPORT_SYMBOL(vmalloc_end);
+EXPORT_SYMBOL(ia64_pfn_valid);
+EXPORT_SYMBOL(max_low_pfn);	/* defined by bootmem.c, but not exported by generic code */
+#endif
+
 #include <asm/processor.h>
-EXPORT_SYMBOL(cpu_data);
+EXPORT_SYMBOL(per_cpu__cpu_info);
+#ifdef CONFIG_SMP
+EXPORT_SYMBOL(__per_cpu_offset);
+EXPORT_SYMBOL(per_cpu__local_per_cpu_offset);
+#endif
 EXPORT_SYMBOL(kernel_thread);
 
 #include <asm/system.h>
@@ -57,7 +73,13 @@ EXPORT_SYMBOL(kernel_thread);
 EXPORT_SYMBOL(last_cli_ip);
 #endif
 
+#include <asm/tlbflush.h>
+
+EXPORT_SYMBOL(flush_tlb_range);
+
 #ifdef CONFIG_SMP
+
+EXPORT_SYMBOL(smp_flush_tlb_all);
 
 #include <asm/current.h>
 #include <asm/hardirq.h>
@@ -65,20 +87,15 @@ EXPORT_SYMBOL(synchronize_irq);
 
 #include <asm/smp.h>
 EXPORT_SYMBOL(smp_call_function);
+EXPORT_SYMBOL(smp_call_function_single);
+EXPORT_SYMBOL(cpu_online_map);
+EXPORT_SYMBOL(phys_cpu_present_map);
+EXPORT_SYMBOL(ia64_cpu_to_sapicid);
+#else /* !CONFIG_SMP */
 
-#include <linux/smp.h>
-EXPORT_SYMBOL(smp_num_cpus);
+EXPORT_SYMBOL(local_flush_tlb_all);
 
-#include <asm/smplock.h>
-EXPORT_SYMBOL(kernel_flag);
-
-/* #include <asm/system.h> */
-EXPORT_SYMBOL(__global_sti);
-EXPORT_SYMBOL(__global_cli);
-EXPORT_SYMBOL(__global_save_flags);
-EXPORT_SYMBOL(__global_restore_flags);
-
-#endif
+#endif /* !CONFIG_SMP */
 
 #include <asm/uaccess.h>
 EXPORT_SYMBOL(__copy_user);
@@ -109,5 +126,87 @@ EXPORT_SYMBOL_NOVERS(__udivdi3);
 EXPORT_SYMBOL_NOVERS(__moddi3);
 EXPORT_SYMBOL_NOVERS(__umoddi3);
 
+#if defined(CONFIG_MD_RAID5) || defined(CONFIG_MD_RAID5_MODULE)
+extern void xor_ia64_2(void);
+extern void xor_ia64_3(void);
+extern void xor_ia64_4(void);
+extern void xor_ia64_5(void);
+
+EXPORT_SYMBOL_NOVERS(xor_ia64_2);
+EXPORT_SYMBOL_NOVERS(xor_ia64_3);
+EXPORT_SYMBOL_NOVERS(xor_ia64_4);
+EXPORT_SYMBOL_NOVERS(xor_ia64_5);
+#endif
+
 extern unsigned long ia64_iobase;
 EXPORT_SYMBOL(ia64_iobase);
+
+#include <asm/pal.h>
+EXPORT_SYMBOL(ia64_pal_call_phys_stacked);
+EXPORT_SYMBOL(ia64_pal_call_phys_static);
+EXPORT_SYMBOL(ia64_pal_call_stacked);
+EXPORT_SYMBOL(ia64_pal_call_static);
+EXPORT_SYMBOL(ia64_load_scratch_fpregs);
+EXPORT_SYMBOL(ia64_save_scratch_fpregs);
+
+extern struct efi efi;
+EXPORT_SYMBOL(efi);
+
+#include <linux/proc_fs.h>
+extern struct proc_dir_entry *efi_dir;
+EXPORT_SYMBOL(efi_dir);
+
+#include <asm/machvec.h>
+#ifdef CONFIG_IA64_GENERIC
+EXPORT_SYMBOL(ia64_mv);
+#endif
+EXPORT_SYMBOL(machvec_noop);
+EXPORT_SYMBOL(machvec_memory_fence);
+EXPORT_SYMBOL(zero_page_memmap_ptr);
+#ifdef CONFIG_PERFMON
+#include <asm/perfmon.h>
+EXPORT_SYMBOL(pfm_register_buffer_fmt);
+EXPORT_SYMBOL(pfm_unregister_buffer_fmt);
+EXPORT_SYMBOL(pfm_mod_fast_read_pmds);
+EXPORT_SYMBOL(pfm_mod_read_pmds);
+EXPORT_SYMBOL(pfm_mod_write_pmcs);
+#endif
+
+#ifdef CONFIG_NUMA
+#include <asm/numa.h>
+EXPORT_SYMBOL(cpu_to_node_map);
+#endif
+
+#include <asm/unwind.h>
+EXPORT_SYMBOL(unw_init_from_blocked_task);
+EXPORT_SYMBOL(unw_init_running);
+EXPORT_SYMBOL(unw_unwind);
+EXPORT_SYMBOL(unw_unwind_to_user);
+EXPORT_SYMBOL(unw_access_gr);
+EXPORT_SYMBOL(unw_access_br);
+EXPORT_SYMBOL(unw_access_fr);
+EXPORT_SYMBOL(unw_access_ar);
+EXPORT_SYMBOL(unw_access_pr);
+
+#ifdef CONFIG_SMP
+# if __GNUC__ < 3 || (__GNUC__ == 3 && __GNUC_MINOR__ < 4)
+/*
+ * This is not a normal routine and we don't want a function descriptor for it, so we use
+ * a fake declaration here.
+ */
+extern char ia64_spinlock_contention_pre3_4;
+EXPORT_SYMBOL(ia64_spinlock_contention_pre3_4);
+# else
+/*
+ * This is not a normal routine and we don't want a function descriptor for it, so we use
+ * a fake declaration here.
+ */
+extern char ia64_spinlock_contention;
+EXPORT_SYMBOL(ia64_spinlock_contention);
+# endif
+#endif
+
+EXPORT_SYMBOL(ia64_max_iommu_merge_mask);
+
+#include <linux/pm.h>
+EXPORT_SYMBOL(pm_idle);

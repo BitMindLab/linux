@@ -1,6 +1,23 @@
+/*
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
+ */
+
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/interrupt.h>
 #include "includes.h"
 #include "hardware.h"
 #include "card.h"
+
+MODULE_DESCRIPTION("ISDN4Linux: Driver for Spellcaster card");
+MODULE_AUTHOR("Spellcaster Telecommunications Inc.");
+MODULE_LICENSE("GPL");
+MODULE_PARM( io, "1-" __MODULE_STRING(MAX_CARDS) "i");
+MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_CARDS) "i");
+MODULE_PARM(ram, "1-" __MODULE_STRING(MAX_CARDS) "i");
+MODULE_PARM(do_reset, "i");
 
 board *adapter[MAX_CARDS];
 int cinst;
@@ -19,7 +36,7 @@ static int do_reset = 0;
 static int sup_irq[] = { 11, 10, 9, 5, 12, 14, 7, 3, 4, 6 };
 #define MAX_IRQS	10
 
-extern void interrupt_handler(int, void *, struct pt_regs *);
+extern irqreturn_t interrupt_handler(int, void *, struct pt_regs *);
 extern int sndpkt(int, int, int, struct sk_buff *);
 extern int command(isdn_ctrl *);
 extern int indicate_status(int, int, ulong, char*);
@@ -37,23 +54,7 @@ int irq_supported(int irq_x)
 	return 0;
 }
 
-#ifdef MODULE
-MODULE_PARM(io, "1-4i");
-MODULE_PARM(irq, "1-4i");
-MODULE_PARM(ram, "1-4i");
-MODULE_PARM(do_reset, "i");
-#define init_sc init_module
-#else
-/*
-Initialization code for non-module version to be included
-
-void sc_setup(char *str, int *ints)
-{
-}
-*/
-#endif
-
-int init_sc(void)
+static int __init sc_init(void)
 {
 	int b = -1;
 	int i, j;
@@ -96,11 +97,12 @@ int init_sc(void)
 			 * No, I/O Base has been provided
 			 */
 			for (i = 0 ; i < MAX_IO_REGS - 1 ; i++) {
-				if(check_region(io[b] + i * 0x400, 1)) {
+				if(!request_region(io[b] + i * 0x400, 1, "sc test")) {
 					pr_debug("check_region for 0x%x failed\n", io[b] + i * 0x400);
 					io[b] = 0;
 					break;
-				}
+				} else
+					release_region(io[b] + i * 0x400, 1);
 			}
 
 			/*
@@ -135,11 +137,12 @@ int init_sc(void)
 				last_base = i + IOBASE_OFFSET;
 				pr_debug("  checking 0x%x...", i);
 				for ( j = 0 ; j < MAX_IO_REGS - 1 ; j++) {
-					if(check_region(i + j * 0x400, 1)) {
+					if(!request_region(i + j * 0x400, 1, "sc test")) {
 						pr_debug("Failed\n");
 						found_io = 0;
 						break;
-					}
+					} else
+						release_region(i + j * 0x400, 1);
 				}	
 
 				if(found_io) {
@@ -176,9 +179,10 @@ int init_sc(void)
 			 * Just look for a signature and ID the
 			 * board model
 			 */
-			if(!check_region(ram[b], SRAM_PAGESIZE)) {
-				pr_debug("check_region for RAM base 0x%x succeeded\n", ram[b]);
+			if(request_region(ram[b], SRAM_PAGESIZE, "sc test")) {
+				pr_debug("request_region for RAM base 0x%x succeeded\n", ram[b]);
 			 	model = identify_board(ram[b], io[b]);
+				release_region(ram[b], SRAM_PAGESIZE);
 			}
 		}
 		else {
@@ -188,9 +192,10 @@ int init_sc(void)
 			 */
 			for (i = SRAM_MIN ; i < SRAM_MAX ; i += SRAM_PAGESIZE) {
 				pr_debug("Checking RAM address 0x%x...\n", i);
-				if(!check_region(i, SRAM_PAGESIZE)) {
+				if(request_region(i, SRAM_PAGESIZE, "sc test")) {
 					pr_debug("  check_region succeeded\n");
 					model = identify_board(i, io[b]);
+					release_region(i, SRAM_PAGESIZE);
 					if (model >= 0) {
 						pr_debug("  Identified a %s\n",
 							boardname[model]);
@@ -200,7 +205,7 @@ int init_sc(void)
 					pr_debug("  Unidentifed or inaccessible\n");
 					continue;
 				}
-				pr_debug("  check_region failed\n");
+				pr_debug("  request failed\n");
 			}
 		}
 		/*
@@ -261,39 +266,6 @@ int init_sc(void)
 		}
 
 		pr_debug("current IRQ: %d  b: %d\n",irq[b],b);
-		/*
-		 * See if we should probe for an irq
-		 */
-		if(irq[b]) {
-			/*
-			 * No we were given one
-			 * See that it is supported and free
-			 */
-			pr_debug("Trying for IRQ: %d\n",irq[b]);
-			if (irq_supported(irq[b])) {
-				if(REQUEST_IRQ(irq[b], interrupt_handler, 
-					SA_PROBE, "sc_probe", NULL)) {
-					pr_debug("IRQ %d is already in use\n", 
-						irq[b]);
-					continue;
-				}
-				FREE_IRQ(irq[b], NULL);
-			}
-		}
-		else {
-			/*
-			 * Yes, we need to probe for an IRQ
-			 */
-			pr_debug("Probing for IRQ...\n");
-			for (i = 0; i < MAX_IRQS ; i++) {
-				if(!REQUEST_IRQ(sup_irq[i], interrupt_handler, SA_PROBE, "sc_probe", NULL)) {
-					pr_debug("Probed for and found IRQ %d\n", sup_irq[i]);
-					FREE_IRQ(sup_irq[i], NULL);
-					irq[b] = sup_irq[i];
-					break;
-				}
-			}
-		}
 
 		/*
 		 * Make sure we got an IRQ
@@ -319,6 +291,7 @@ int init_sc(void)
 		}
 		memset(interface, 0, sizeof(isdn_if));
 
+		interface->owner = THIS_MODULE;
 		interface->hl_hdrlen = 0;
 		interface->channels = channels;
 		interface->maxbufsize = BUFFER_SIZE;
@@ -341,6 +314,7 @@ int init_sc(void)
 			continue;
 		}
 		memset(adapter[cinst], 0, sizeof(board));
+		spin_lock_init(&adapter[cinst]->lock);
 
 		if(!register_isdn(interface)) {
 			/*
@@ -379,8 +353,16 @@ int init_sc(void)
 		 * Lock down the hardware resources
 		 */
 		adapter[cinst]->interrupt = irq[b];
-		REQUEST_IRQ(adapter[cinst]->interrupt, interrupt_handler, SA_INTERRUPT, 
-			interface->id, NULL);
+		if (request_irq(adapter[cinst]->interrupt, interrupt_handler, SA_INTERRUPT, 
+			interface->id, NULL))
+		{
+			kfree(adapter[cinst]->channel);
+			indicate_status(cinst, ISDN_STAT_UNLOAD, 0, NULL);	/* Fix me */
+			kfree(interface);
+			kfree(adapter[cinst]);
+			continue;
+			
+		}
 		adapter[cinst]->iobase = io[b];
 		for(i = 0 ; i < MAX_IO_REGS - 1 ; i++) {
 			adapter[cinst]->ioport[i] = io[b] + i * 0x400;
@@ -410,8 +392,7 @@ int init_sc(void)
 	return status;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit sc_exit(void)
 {
 	int i, j;
 
@@ -463,7 +444,6 @@ void cleanup_module(void)
 	}
 	pr_info("SpellCaster ISA ISDN Adapter Driver Unloaded.\n");
 }
-#endif
 
 int identify_board(unsigned long rambase, unsigned int iobase) 
 {
@@ -579,3 +559,6 @@ int identify_board(unsigned long rambase, unsigned int iobase)
 		
 	return -1;
 }
+
+module_init(sc_init);
+module_exit(sc_exit);

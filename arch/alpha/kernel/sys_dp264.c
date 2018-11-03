@@ -5,6 +5,10 @@
  *	Copyright (C) 1996, 1999 Jay A Estabrook
  *	Copyright (C) 1998, 1999 Richard Henderson
  *
+ *	Modified by Christopher C. Chimelis, 2001 to
+ *	add support for the addition of Shark to the
+ *	Tsunami family.
+ *
  * Code supporting the DP264 (EV6+TSUNAMI).
  */
 
@@ -26,6 +30,7 @@
 #include <asm/pgtable.h>
 #include <asm/core_tsunami.h>
 #include <asm/hwrpb.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -192,25 +197,25 @@ clipper_set_affinity(unsigned int irq, unsigned long affinity)
 }
 
 static struct hw_interrupt_type dp264_irq_type = {
-	typename:	"DP264",
-	startup:	dp264_startup_irq,
-	shutdown:	dp264_disable_irq,
-	enable:		dp264_enable_irq,
-	disable:	dp264_disable_irq,
-	ack:		dp264_disable_irq,
-	end:		dp264_end_irq,
-	set_affinity:	dp264_set_affinity,
+	.typename	= "DP264",
+	.startup	= dp264_startup_irq,
+	.shutdown	= dp264_disable_irq,
+	.enable		= dp264_enable_irq,
+	.disable	= dp264_disable_irq,
+	.ack		= dp264_disable_irq,
+	.end		= dp264_end_irq,
+	.set_affinity	= dp264_set_affinity,
 };
 
 static struct hw_interrupt_type clipper_irq_type = {
-	typename:	"CLIPPER",
-	startup:	clipper_startup_irq,
-	shutdown:	clipper_disable_irq,
-	enable:		clipper_enable_irq,
-	disable:	clipper_disable_irq,
-	ack:		clipper_disable_irq,
-	end:		clipper_end_irq,
-	set_affinity:	clipper_set_affinity,
+	.typename	= "CLIPPER",
+	.startup	= clipper_startup_irq,
+	.shutdown	= clipper_disable_irq,
+	.enable		= clipper_enable_irq,
+	.disable	= clipper_disable_irq,
+	.ack		= clipper_disable_irq,
+	.end		= clipper_end_irq,
+	.set_affinity	= clipper_set_affinity,
 };
 
 static void
@@ -404,13 +409,13 @@ dp264_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 	};
 	const long min_idsel = 5, max_idsel = 10, irqs_per_slot = 5;
 
-	struct pci_controler *hose = dev->sysdata;
+	struct pci_controller *hose = dev->sysdata;
 	int irq = COMMON_TABLE_LOOKUP;
 
 	if (irq > 0) {
 		irq += 16 * hose->index;
 	} else {
-		/* ??? The Contaq IDE controler on the ISA bridge uses
+		/* ??? The Contaq IDE controller on the ISA bridge uses
 		   "legacy" interrupts 14 and 15.  I don't know if anything
 		   can wind up at the same slot+pin on hose1, so we'll
 		   just have to trust whatever value the console might
@@ -455,10 +460,10 @@ monet_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 static u8 __init
 monet_swizzle(struct pci_dev *dev, u8 *pinp)
 {
-	struct pci_controler *hose = dev->sysdata;
+	struct pci_controller *hose = dev->sysdata;
 	int slot, pin = *pinp;
 
-	if (hose->first_busno == dev->bus->number) {
+	if (!dev->bus->parent) {
 		slot = PCI_SLOT(dev->devfn);
 	}
 	/* Check for the built-in bridge on hose 1. */
@@ -521,7 +526,7 @@ clipper_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 	};
 	const long min_idsel = 1, max_idsel = 7, irqs_per_slot = 5;
 
-	struct pci_controler *hose = dev->sysdata;
+	struct pci_controller *hose = dev->sysdata;
 	int irq = COMMON_TABLE_LOOKUP;
 
 	if (irq > 0)
@@ -561,96 +566,129 @@ webbrick_init_arch(void)
  */
 
 struct alpha_machine_vector dp264_mv __initmv = {
-	vector_name:		"DP264",
+	.vector_name		= "DP264",
 	DO_EV6_MMU,
 	DO_DEFAULT_RTC,
 	DO_TSUNAMI_IO,
 	DO_TSUNAMI_BUS,
-	machine_check:		tsunami_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	DEFAULT_MEM_BASE,
+	.machine_check		= tsunami_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= DEFAULT_MEM_BASE,
+	.pci_dac_offset		= TSUNAMI_DAC_OFFSET,
 
-	nr_irqs:		64,
-	device_interrupt:	dp264_device_interrupt,
+	.nr_irqs		= 64,
+	.device_interrupt	= dp264_device_interrupt,
 
-	init_arch:		tsunami_init_arch,
-	init_irq:		dp264_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		dp264_init_pci,
-	kill_arch:		tsunami_kill_arch,
-	pci_map_irq:		dp264_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= tsunami_init_arch,
+	.init_irq		= dp264_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= dp264_init_pci,
+	.kill_arch		= tsunami_kill_arch,
+	.pci_map_irq		= dp264_map_irq,
+	.pci_swizzle		= common_swizzle,
 };
 ALIAS_MV(dp264)
 
 struct alpha_machine_vector monet_mv __initmv = {
-	vector_name:		"Monet",
+	.vector_name		= "Monet",
 	DO_EV6_MMU,
 	DO_DEFAULT_RTC,
 	DO_TSUNAMI_IO,
 	DO_TSUNAMI_BUS,
-	machine_check:		tsunami_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	DEFAULT_MEM_BASE,
+	.machine_check		= tsunami_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= DEFAULT_MEM_BASE,
+	.pci_dac_offset		= TSUNAMI_DAC_OFFSET,
 
-	nr_irqs:		64,
-	device_interrupt:	dp264_device_interrupt,
+	.nr_irqs		= 64,
+	.device_interrupt	= dp264_device_interrupt,
 
-	init_arch:		tsunami_init_arch,
-	init_irq:		dp264_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		monet_init_pci,
-	kill_arch:		tsunami_kill_arch,
-	pci_map_irq:		monet_map_irq,
-	pci_swizzle:		monet_swizzle,
+	.init_arch		= tsunami_init_arch,
+	.init_irq		= dp264_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= monet_init_pci,
+	.kill_arch		= tsunami_kill_arch,
+	.pci_map_irq		= monet_map_irq,
+	.pci_swizzle		= monet_swizzle,
 };
 
 struct alpha_machine_vector webbrick_mv __initmv = {
-	vector_name:		"Webbrick",
+	.vector_name		= "Webbrick",
 	DO_EV6_MMU,
 	DO_DEFAULT_RTC,
 	DO_TSUNAMI_IO,
 	DO_TSUNAMI_BUS,
-	machine_check:		tsunami_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	DEFAULT_MEM_BASE,
+	.machine_check		= tsunami_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= DEFAULT_MEM_BASE,
+	.pci_dac_offset		= TSUNAMI_DAC_OFFSET,
 
-	nr_irqs:		64,
-	device_interrupt:	dp264_device_interrupt,
+	.nr_irqs		= 64,
+	.device_interrupt	= dp264_device_interrupt,
 
-	init_arch:		webbrick_init_arch,
-	init_irq:		dp264_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		common_init_pci,
-	kill_arch:		tsunami_kill_arch,
-	pci_map_irq:		webbrick_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= webbrick_init_arch,
+	.init_irq		= dp264_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= common_init_pci,
+	.kill_arch		= tsunami_kill_arch,
+	.pci_map_irq		= webbrick_map_irq,
+	.pci_swizzle		= common_swizzle,
 };
 
 struct alpha_machine_vector clipper_mv __initmv = {
-	vector_name:		"Clipper",
+	.vector_name		= "Clipper",
 	DO_EV6_MMU,
 	DO_DEFAULT_RTC,
 	DO_TSUNAMI_IO,
 	DO_TSUNAMI_BUS,
-	machine_check:		tsunami_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	DEFAULT_MEM_BASE,
+	.machine_check		= tsunami_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= DEFAULT_MEM_BASE,
+	.pci_dac_offset		= TSUNAMI_DAC_OFFSET,
 
-	nr_irqs:		64,
-	device_interrupt:	dp264_device_interrupt,
+	.nr_irqs		= 64,
+	.device_interrupt	= dp264_device_interrupt,
 
-	init_arch:		tsunami_init_arch,
-	init_irq:		clipper_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		common_init_pci,
-	kill_arch:		tsunami_kill_arch,
-	pci_map_irq:		clipper_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= tsunami_init_arch,
+	.init_irq		= clipper_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= common_init_pci,
+	.kill_arch		= tsunami_kill_arch,
+	.pci_map_irq		= clipper_map_irq,
+	.pci_swizzle		= common_swizzle,
+};
+
+/* Sharks strongly resemble Clipper, at least as far
+ * as interrupt routing, etc, so we're using the
+ * same functions as Clipper does
+ */
+
+struct alpha_machine_vector shark_mv __initmv = {
+	.vector_name		= "Shark",
+	DO_EV6_MMU,
+	DO_DEFAULT_RTC,
+	DO_TSUNAMI_IO,
+	DO_TSUNAMI_BUS,
+	.machine_check		= tsunami_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= DEFAULT_MEM_BASE,
+	.pci_dac_offset		= TSUNAMI_DAC_OFFSET,
+
+	.nr_irqs		= 64,
+	.device_interrupt	= dp264_device_interrupt,
+
+	.init_arch		= tsunami_init_arch,
+	.init_irq		= clipper_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= common_init_pci,
+	.kill_arch		= tsunami_kill_arch,
+	.pci_map_irq		= clipper_map_irq,
+	.pci_swizzle		= common_swizzle,
 };
 
 /* No alpha_mv alias for webbrick/monet/clipper, since we compile them

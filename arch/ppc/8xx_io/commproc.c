@@ -1,4 +1,3 @@
-
 /*
  * General Purpose functions for the global management of the
  * Communication Processor Module.
@@ -33,7 +32,9 @@
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/8xx_immap.h>
-#include "commproc.h"
+#include <asm/commproc.h>
+
+extern int get_pteptr(struct mm_struct *mm, unsigned long addr, pte_t **ptep);
 
 static	uint	dp_alloc_base;	/* Starting offset in DP ram */
 static	uint	dp_alloc_top;	/* Max offset + 1 */
@@ -44,13 +45,69 @@ cpm8xx_t	*cpmp;		/* Pointer to comm processor space */
 /* CPM interrupt vector functions.
 */
 struct	cpm_action {
-	void	(*handler)(void *);
+	void	(*handler)(void *, struct pt_regs * regs);
 	void	*dev_id;
 };
 static	struct	cpm_action cpm_vecs[CPMVEC_NR];
 static	void	cpm_interrupt(int irq, void * dev, struct pt_regs * regs);
-static	void	cpm_error_interrupt(void *);
+static	void	cpm_error_interrupt(void *, struct pt_regs * regs);
+static	void	alloc_host_memory(void);
 
+#if 1
+void
+m8xx_cpm_reset()
+{
+	volatile immap_t	 *imp;
+	volatile cpm8xx_t	*commproc;
+	pte_t			*pte;
+
+	imp = (immap_t *)IMAP_ADDR;
+	commproc = (cpm8xx_t *)&imp->im_cpm;
+
+#ifdef CONFIG_UCODE_PATCH
+	/* Perform a reset.
+	*/
+	commproc->cp_cpcr = (CPM_CR_RST | CPM_CR_FLG);
+
+	/* Wait for it.
+	*/
+	while (commproc->cp_cpcr & CPM_CR_FLG);
+
+	cpm_load_patch(imp);
+#endif
+
+	/* Set SDMA Bus Request priority 5.
+	 * On 860T, this also enables FEC priority 6.  I am not sure
+	 * this is what we realy want for some applications, but the
+	 * manual recommends it.
+	 * Bit 25, FAM can also be set to use FEC aggressive mode (860T).
+	 */
+	imp->im_siu_conf.sc_sdcr = 1;
+
+	/* Reclaim the DP memory for our use.
+	*/
+	dp_alloc_base = CPM_DATAONLY_BASE;
+	dp_alloc_top = dp_alloc_base + CPM_DATAONLY_SIZE;
+
+	/* Tell everyone where the comm processor resides.
+	*/
+	cpmp = (cpm8xx_t *)commproc;
+}
+
+/* We used to do this earlier, but have to postpone as long as possible
+ * to ensure the kernel VM is now running.
+ */
+static void
+alloc_host_memory()
+{
+	uint	physaddr;
+
+	/* Set the host page for allocation.
+	*/
+	host_buffer = (uint)consistent_alloc(GFP_KERNEL, PAGE_SIZE, &physaddr);
+	host_end = host_buffer + PAGE_SIZE;
+}
+#else
 void
 m8xx_cpm_reset(uint host_page_addr)
 {
@@ -61,13 +118,7 @@ m8xx_cpm_reset(uint host_page_addr)
 	imp = (immap_t *)IMAP_ADDR;
 	commproc = (cpm8xx_t *)&imp->im_cpm;
 
-#ifdef notdef
-	/* We can't do this.  It seems to blow away the microcode
-	 * patch that EPPC-Bug loaded for us.  EPPC-Bug uses SCC1 for
-	 * Ethernet, SMC1 for the console, and I2C for serial EEPROM.
-	 * Our own drivers quickly reset all of these.
-	 */
-
+#ifdef CONFIG_UCODE_PATCH
 	/* Perform a reset.
 	*/
 	commproc->cp_cpcr = (CPM_CR_RST | CPM_CR_FLG);
@@ -75,6 +126,8 @@ m8xx_cpm_reset(uint host_page_addr)
 	/* Wait for it.
 	*/
 	while (commproc->cp_cpcr & CPM_CR_FLG);
+
+	cpm_load_patch(imp);
 #endif
 
 	/* Set SDMA Bus Request priority 5.
@@ -94,14 +147,23 @@ m8xx_cpm_reset(uint host_page_addr)
 	*/
 	host_buffer = host_page_addr;	/* Host virtual page address */
 	host_end = host_page_addr + PAGE_SIZE;
-	pte = va_to_pte(host_page_addr);
-	pte_val(*pte) |= _PAGE_NO_CACHE;
-	flush_tlb_page(init_mm.mmap, host_buffer);
+
+	/* We need to get this page early, so I have to do it the
+	 * hard way.
+	 */
+	if (get_pteptr(&init_mm, host_page_addr, &pte)) {
+		pte_val(*pte) |= _PAGE_NO_CACHE;
+		flush_tlb_page(init_mm.mmap, host_buffer);
+	}
+	else {
+		panic("Huh?  No CPM host page?");
+	}
 
 	/* Tell everyone where the comm processor resides.
 	*/
 	cpmp = (cpm8xx_t *)commproc;
 }
+#endif
 
 /* This is called during init_IRQ.  We used to do it above, but this
  * was too early since init_IRQ was not yet called.
@@ -142,7 +204,7 @@ cpm_interrupt(int irq, void * dev, struct pt_regs * regs)
 	vec >>= 11;
 
 	if (cpm_vecs[vec].handler != 0)
-		(*cpm_vecs[vec].handler)(cpm_vecs[vec].dev_id);
+		(*cpm_vecs[vec].handler)(cpm_vecs[vec].dev_id, regs);
 	else
 		((immap_t *)IMAP_ADDR)->im_cpic.cpic_cimr &= ~(1 << vec);
 
@@ -159,15 +221,24 @@ cpm_interrupt(int irq, void * dev, struct pt_regs * regs)
  * tests in the interrupt handler.
  */
 static	void
-cpm_error_interrupt(void *dev)
+cpm_error_interrupt(void *dev, struct pt_regs *regs)
 {
 }
 
 /* Install a CPM interrupt handler.
 */
 void
-cpm_install_handler(int vec, void (*handler)(void *), void *dev_id)
+cpm_install_handler(int vec, void (*handler)(void *, struct pt_regs *regs),
+		    void *dev_id)
 {
+
+	/* If null handler, assume we are trying to free the IRQ.
+	*/
+	if (!handler) {
+		cpm_free_handler(vec);
+		return;
+	}
+
 	if (cpm_vecs[vec].handler != 0)
 		printk("CPM interrupt %x replacing %x\n",
 			(uint)handler, (uint)cpm_vecs[vec].handler);
@@ -204,6 +275,12 @@ m8xx_cpm_dpalloc(uint size)
 	return(retloc);
 }
 
+uint
+m8xx_cpm_dpalloc_index(void)
+{
+	return dp_alloc_base;
+}
+
 /* We also own one page of host buffer space for the allocation of
  * UART "fifos" and the like.
  */
@@ -211,6 +288,11 @@ uint
 m8xx_cpm_hostalloc(uint size)
 {
 	uint	retloc;
+
+#if 1
+	if (host_buffer == 0)
+		alloc_host_memory();
+#endif
 
 	if ((host_buffer + size) >= host_end)
 		return(0);
@@ -226,8 +308,9 @@ m8xx_cpm_hostalloc(uint size)
  * The internal baud rate clock is the system clock divided by 16.
  * This assumes the baudrate is 16x oversampled by the uart.
  */
-#define BRG_INT_CLK	(((bd_t *)__res)->bi_intfreq * 1000000)
-#define BRG_UART_CLK	(BRG_INT_CLK/16)
+#define BRG_INT_CLK		(((bd_t *)__res)->bi_intfreq)
+#define BRG_UART_CLK		(BRG_INT_CLK/16)
+#define BRG_UART_CLK_DIV16	(BRG_UART_CLK/16)
 
 void
 m8xx_cpm_setbrg(uint brg, uint rate)
@@ -238,6 +321,12 @@ m8xx_cpm_setbrg(uint brg, uint rate)
 	*/
 	bp = (uint *)&cpmp->cp_brgc1;
 	bp += brg;
-	*bp = ((BRG_UART_CLK / rate) << 1) | CPM_BRG_EN;
+	/* The BRG has a 12-bit counter.  For really slow baud rates (or
+	 * really fast processors), we may have to further divide by 16.
+	 */
+	if (((BRG_UART_CLK / rate) - 1) < 4096)
+		*bp = (((BRG_UART_CLK / rate) - 1) << 1) | CPM_BRG_EN;
+	else
+		*bp = (((BRG_UART_CLK_DIV16 / rate) - 1) << 1) |
+						CPM_BRG_EN | CPM_BRG_DIV16;
 }
-
